@@ -1,0 +1,11 @@
+# Installed skills (regenerated from skills-lock.json)
+.agents/
+
+# Local Claude Code settings (machine-specific paths and permissions)
+.claude/
+skills-lock.json
+
+# Kiro tool directory
+.kiro/
+
+TODO.md
