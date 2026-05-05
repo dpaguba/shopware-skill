@@ -1,7 +1,7 @@
 # Shopware 6 Agent Skill
 
 <!-- readme-i18n-selector: start -->
-[English](README.md) · [Русский](README.ru.md)
+[English](README.md)
 <!-- readme-i18n-selector: end -->
 
 [![skills.sh](https://skills.sh/b/dpaguba/shopware-skill)](https://skills.sh/dpaguba/shopware-skill)
