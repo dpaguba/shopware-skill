@@ -49,11 +49,63 @@ class MyAdminController extends AbstractController
 }
 ```
 
-| Scope | Auth mechanism | Context type |
-|---|---|---|
-| `storefront` | Session cookie | `SalesChannelContext` |
-| `store-api` | `sw-access-key` header | `SalesChannelContext` |
-| `api` | OAuth2 Bearer token | `Context` |
+| Scope | Auth mechanism | Context type | Constant |
+|---|---|---|---|
+| `storefront` | Session cookie | `SalesChannelContext` | `StorefrontRouteScope::ID` |
+| `store-api` | `sw-access-key` header | `SalesChannelContext` | `StoreApiRouteScope::ID` |
+| `api` | OAuth2 Bearer token | `Context` | `ApiRouteScope::ID` |
+
+### Class level vs method level
+
+`_routeScope` is a Symfony route default, so the usual merge rules apply: a scope on the method
+**overrides** the one on the class, it does not add to it. Declare it once on the class and let every
+action inherit it. Put it on a method only when one action in an otherwise storefront controller must be
+reachable through a different scope, which is rare and usually a sign the action belongs in its own
+controller.
+
+```php
+#[Route(defaults: ['_routeScope' => ['storefront']])]   // applies to every action below
+class MyController extends StorefrontController
+{
+    #[Route(path: '/my/page', name: 'frontend.my.page', methods: ['GET'])]
+    public function page(): Response {}                  // scope: storefront (inherited)
+
+    #[Route(
+        path: '/my/api-hook',
+        name: 'api.my.hook',
+        defaults: ['_routeScope' => ['api']],            // overrides the class scope
+        methods: ['POST']
+    )]
+    public function hook(Context $context): JsonResponse {}
+}
+```
+
+A route may list several scopes: `['_routeScope' => ['storefront', 'store-api']]`. Do this only when the
+same action really serves both, and remember the resolved context type differs per request.
+
+**A route with no scope anywhere is not merely unscoped, it is broken.** `RouteScopeListener` throws
+`RoutingException::invalidRouteScope()` on the first request, so the failure shows up as a 500 rather
+than as a missing guard.
+
+Core uses the constants instead of literals, and so should plugin code that needs to survive renames:
+
+```php
+use Shopware\Core\PlatformRequest;
+use Shopware\Storefront\Framework\Routing\StorefrontRouteScope;
+
+#[Route(defaults: [PlatformRequest::ATTRIBUTE_ROUTE_SCOPE => [StorefrontRouteScope::ID]])]
+```
+
+Related defaults, all settable at either level with the same override semantics:
+
+| Default | Effect |
+|---|---|
+| `_loginRequired` | Storefront/Store API: customer must be logged in |
+| `_loginRequiredAllowGuest` | Also accepts guest sessions |
+| `_acl` | Admin API: array of required ACL privileges |
+| `_noStore` | Response is excluded from the HTTP cache |
+| `_httpCache` | Response is cacheable |
+| `_captcha` | Enables configured captchas for the route |
 
 ---
 
