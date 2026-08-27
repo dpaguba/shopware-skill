@@ -3,8 +3,8 @@ name: shopware6
 description: >-
   Shopware 6 development across plugins, apps and themes: DAL entities, migrations, custom fields and entity extensions, Storefront (Twig, SCSS, JS plugin system), Admin (Vue 3, Meteor Admin SDK), Admin API and Store API, cart processors, collectors and validators, payment and shipping handlers, rule builder conditions, CMS elements, App System manifests and webhooks, SEO URLs, mail templates, state machines, message queue, Elasticsearch, HTTP cache, PHPUnit and Jest testing, security and deployment. Use when the user asks to create a Shopware plugin, subscriber, custom entity or admin module, override a Storefront template, decorate a service, write a DAL migration, or handle any other Shopware 6 development task.
 when_to_use: >-
-  Trigger on any mention of: Shopware 6, sw6, Storefront (Twig/SCSS), Admin (Vue.js/Shopware Admin API), DAL (Data Abstraction Layer), App System, manifest.xml, services.xml, EntityRepository, EntityDefinition, EntityExtension, SubscriberInterface, SalesChannelContext, sw-context-token, sw-access-key, StaticEntityRepository, ProductBuilder, PaymentHandlerInterface, MessageBusInterface, Rule (shopware.rule.definition), CMS element, ElasticsearchHelper, HttpCache, CartProcessorInterface, CartValidatorInterface, CartDataCollectorInterface, PercentagePriceDefinition, AbsolutePriceDefinition, SeoUrlRouteInterface, StateMachineRegistry, ThemeInterface, theme.json, FilesystemOperator, RedisConnectionProvider, RateLimiter, EntityIndexer, InAppPurchase, CheckoutGateway, or Shopware-specific CLI commands.
-version: 0.2.0
+  Trigger on any mention of: Shopware 6, sw6, Storefront (Twig/SCSS), Admin (Vue.js/Shopware Admin API), DAL (Data Abstraction Layer), App System, manifest.xml, services.xml, EntityRepository, EntityDefinition, EntityExtension, SubscriberInterface, SalesChannelContext, sw-context-token, sw-access-key, StaticEntityRepository, ProductBuilder, PaymentHandlerInterface, MessageBusInterface, Rule (shopware.rule.definition), CMS element, ElasticsearchHelper, HttpCache, CartProcessorInterface, CartValidatorInterface, CartDataCollectorInterface, PercentagePriceDefinition, AbsolutePriceDefinition, SeoUrlRouteInterface, StateMachineRegistry, ThemeInterface, theme.json, FilesystemOperator, RedisConnectionProvider, RateLimiter, EntityIndexer, InAppPurchase, CheckoutGateway, AbstractPaymentHandler, PaymentHandlerType, Meteor Component Library, mt-button/mt-card/mt-text-field, Pinia Shopware.Store, Vite admin build, storefront:dev-server, Twig UX components, manifest-3.0.xsd, migration from Shopware 6.6 to 6.7, or Shopware-specific CLI commands.
+version: 0.3.0
 ---
 
 # Shopware 6 Development
@@ -15,12 +15,30 @@ Shopware 6 is a PHP/Symfony platform. Clarify which layer is being targeted befo
 
 | Layer | Tech | Where |
 |---|---|---|
-| **Core / PHP** | PHP 8.2+, Symfony 6.4 (SW 6.5) / Symfony 7 (SW 6.6+) | `src/` — Services, DAL, Events |
-| **Storefront** | Twig 3, SCSS, Vanilla JS | `src/Resources/views/storefront/` |
-| **Admin** | Vue 3, Shopware Admin API | `src/Resources/app/administration/` |
-| **App System** | manifest.xml, App Scripts | External server or Twig scripts (no PHP needed) |
+| **Core / PHP** | PHP 8.2+, Symfony 7.4 (SW 6.7) / Symfony 7.0 (SW 6.6) | `src/` — Services, DAL, Events |
+| **Storefront** | Twig 3, SCSS, Vanilla JS, Vite dev server (6.7.11+) | `src/Resources/views/storefront/` |
+| **Admin** | Vue 3, Pinia, Meteor components (`mt-*`), Vite build | `src/Resources/app/administration/` |
+| **App System** | manifest.xml (schema 3.0 in 6.7), App Scripts | External server or Twig scripts (no PHP needed) |
 
 **Plugin vs App System:** Use Plugin for self-hosted installs needing direct PHP/DB access. Use App System for SaaS/multi-tenant or when targeting the Shopware Store.
+
+### Which version is this?
+
+Ask or infer the target version before generating code. The current line is **6.7.13.x**; 6.8 is planned
+for 2027. 6.7 broke a lot of plugin-facing API, so code that is correct for 6.6 is often wrong for 6.7:
+
+| Topic | SW 6.6 | SW 6.7 |
+|---|---|---|
+| Payment handler | `Synchronous`/`AsynchronousPaymentHandlerInterface` | `AbstractPaymentHandler` |
+| Admin components | `sw-button`, `sw-card`, `sw-text-field` | `mt-button`, `mt-card`, `mt-text-field` |
+| Admin state | Vuex `Shopware.State` (deprecated) | Pinia `Shopware.Store` only |
+| Admin build | Webpack | Vite |
+| `EntityExtension` | `getDefinitionClass()` | plus abstract `getEntityName()` |
+| Plugin custom entities | `entities.xml` | removed, use `EntityDefinition` |
+| `IdsCollection` | `Shopware\Core\Framework\Test\` | `Shopware\Core\Test\Stub\Framework\` |
+
+Full list in **[references/migration-6.7.md](references/migration-6.7.md)**. When the version is unknown,
+target 6.7 and mention what differs on 6.6.
 
 ---
 
@@ -219,14 +237,15 @@ Load these when working on specific areas:
 - **[references/testing.md](references/testing.md)** — PHPUnit unit/integration, **StaticEntityRepository**, **ProductBuilder**, Jest, Cypress, assertSame vs assertEquals
 - **[references/app-system.md](references/app-system.md)** — App System: **manifest.xml**, **webhook HMAC verification**, **registration handshake**, **App Scripts** (Twig-based, no server)
 - **[references/security.md](references/security.md)** — Security: route scopes, **CSRF protection**, input validation, authorization by customer, SQL injection prevention
-- **[references/integrations.md](references/integrations.md)** — Integrations: **Payment Handler** (sync/async), Shipping Method, **CMS Elements**, **Rule Builder** conditions, Flow Builder events
+- **[references/integrations.md](references/integrations.md)** — Integrations: **Payment Handler** (`AbstractPaymentHandler`), **shipping costs** (cart processor, not a calculator tag), **CMS Elements**, **Rule Builder** conditions, Flow Builder events
 - **[references/performance.md](references/performance.md)** — Performance: **HTTP Cache** (tags, invalidation), **Message Queue** (async processing), **Elasticsearch/OpenSearch**, object cache
 - **[references/devops.md](references/devops.md)** — DevOps: **structured logging**, PHPStan, php-cs-fixer, CI/CD, deployment, debugging, **media handling**, upgrade safety
+- **[references/migration-6.7.md](references/migration-6.7.md)** — **6.6 to 6.7 migration**: breaking changes across Core/DAL, Admin, Storefront, cache, API, hosting, plus what 6.7.x added (Vite dev server, Twig UX components, MCP server)
 - **[references/advanced.md](references/advanced.md)** — Advanced: **PHP Attributes entities** (SW 6.6.3+), **Flysystem** (public/private file storage), **Redis** (cache/queue), **Rate Limiter** (compiler pass + RateLimiter service), **Data Indexer**, **Field Inheritance** (variants), **In-App Purchases**
 
 ### Examples
 
 Working code examples in `examples/`:
 
-- **[examples/custom-entity/](examples/custom-entity/)** — Complete custom entity plugin (Definition, Entity, Repository, Migration)
-- **[examples/storefront-subscriber/](examples/storefront-subscriber/)** — Storefront page loaded subscriber with template variable injection
+- **[examples/custom-entity/](examples/custom-entity/)** — Runnable plugin: Definition, Entity, Collection, Migration, versioned FK to `product`, uninstall cleanup
+- **[examples/storefront-subscriber/](examples/storefront-subscriber/)** — Runnable plugin: page subscriber, sales channel repository, Twig override, snippets
