@@ -573,8 +573,20 @@ class ProductExtension extends EntityExtension
     {
         return ProductDefinition::class;
     }
+
+    /**
+     * Abstract since SW 6.7: every extension must return the entity name it extends.
+     * Return the table-style name, e.g. 'product', 'product_media', 'order_line_item'.
+     */
+    public function getEntityName(): string
+    {
+        return ProductDefinition::ENTITY_NAME;
+    }
 }
 ```
+
+> **SW 6.7 breaking change.** `EntityExtension::getEntityName()` is abstract. An extension written for
+> 6.6 that only implements `getDefinitionClass()` is fatal on 6.7.
 
 Register with **`shopware.entity.extension`** tag (not `shopware.entity.definition`):
 
