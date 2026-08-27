@@ -223,6 +223,29 @@ bin/console theme:compile
 bin/console theme:refresh
 ```
 
+### Dev server (SW 6.7.11+)
+
+```bash
+composer storefront:dev-server
+```
+
+Vite based, needs no proxy, and applies SCSS and JS changes live while you browse the normal Storefront.
+`composer watch:storefront` still works but is deprecated and will be removed in 6.8.
+
+### Global JS event bus (SW 6.7.11+)
+
+Plugins can communicate without importing each other:
+
+```js
+window.Shopware.emit('Filter:Change', { foo: 'bar' });
+window.Shopware.on('Filter:Change', ({ foo }) => { /* ... */ });
+```
+
+### Twig UX components (SW 6.7.11+)
+
+Reusable storefront components with their own SCSS and JS, usable inside existing templates. This is the
+base of the upcoming content system, so prefer it over copy-pasted include partials for new work.
+
 ---
 
 ## Custom Controller (Storefront Route)

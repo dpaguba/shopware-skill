@@ -164,6 +164,30 @@ Fields with `"scss": true` (default) are injected as SCSS variables automaticall
 
 ---
 
+### Config values as CSS custom properties (SW 6.7.11+)
+
+Every theme config field that is not marked `scss: false` is exposed as a native custom property, so
+runtime theming no longer requires recompiling SCSS:
+
+```css
+.btn-primary {
+    background: var(--sw-color-brand-primary);
+}
+```
+
+### Referencing single files from other bundles (SW 6.7.11+)
+
+`style` and `script` entries can point at one file in another bundle instead of pulling its whole build:
+
+```json
+{
+  "style": ["@MyTheme/app/storefront/src/scss/overrides.scss"],
+  "script": ["@MyPlugin/app/storefront/dist/storefront/my-plugin.js"]
+}
+```
+
+---
+
 ## SCSS — Bootstrap Variable Overrides
 
 `overrides.scss` is compiled first and can override Bootstrap and Shopware variables:

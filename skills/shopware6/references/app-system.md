@@ -27,7 +27,7 @@ custom/apps/MyVendorApp/
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <manifest xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-          xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/shopware/shopware/trunk/src/Core/Framework/App/Manifest/Schema/manifest-2.0.xsd">
+          xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/shopware/shopware/trunk/src/Core/Framework/App/Manifest/Schema/manifest-3.0.xsd">
 
     <meta>
         <name>MyVendorApp</name>
@@ -128,7 +128,10 @@ custom/apps/MyVendorApp/
         </cookie>
     </cookies>
 
-    <!-- Payment method provided by your app -->
+    <!-- Payment method provided by your app.
+         SW 6.7: manifest schema is manifest-3.0.xsd, <capture-url> was removed, use <pay-url>.
+         Payment states are no longer set by default for async payments: the app must transition
+         the transaction itself. The finalize call now delivers query parameters under `requestData`. -->
     <payments>
         <payment-method>
             <identifier>my_app_payment</identifier>

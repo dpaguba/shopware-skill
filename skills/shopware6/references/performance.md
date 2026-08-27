@@ -4,6 +4,13 @@
 
 ## HTTP Cache
 
+> **SW 6.7 cache rework.** Invalidation is now **delayed**: tags are collected and processed by a worker
+> instead of being flushed inside the request, so a change is not visible in the cache the microsecond it
+> is written. Store-API route caching was **removed** entirely, and header and footer are rendered through
+> **ESI**, which means variables that used to be available in those templates are gone. Fine-grained
+> caching was removed as well. Varnish setups now require the **XKeys** module.
+
+
 Shopware's HTTP cache (based on Symfony's `HttpCache`) eliminates PHP execution for cached pages.
 
 ### Enable Caching on Custom Routes

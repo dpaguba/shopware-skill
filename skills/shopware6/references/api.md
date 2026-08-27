@@ -13,6 +13,11 @@ Shopware 6 provides two distinct APIs:
 
 ## Admin API — Authentication
 
+> **SW 6.7.** `/api/oauth/authorize` was removed and non spec-compliant `/api/oauth/token` requests are
+> rejected: send `Content-Type: application/json` or `application/x-www-form-urlencoded` with the exact
+> grant parameters. RSA JWT secrets were removed. 6.7.1 added new Admin API request headers.
+
+
 ```bash
 # Get token
 curl -X POST https://shopware.test/api/oauth/token \
