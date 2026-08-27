@@ -232,6 +232,100 @@ PluginName/
 </config>
 ```
 
+### Field types
+
+| `type` | Renders |
+|---|---|
+| `text` | Single-line input |
+| `textarea` | Multi-line input |
+| `text-editor` | WYSIWYG editor |
+| `url` | URL input with validation |
+| `password` | Masked input |
+| `int` / `float` | Numeric input, supports `<min>`, `<max>`, `<step>` |
+| `bool` | Toggle |
+| `checkbox` | Checkbox |
+| `datetime` / `date` / `time` | Pickers |
+| `colorpicker` | Color picker |
+| `single-select` | Dropdown, one value |
+| `multi-select` | Dropdown, list of values |
+
+`single-select` and `multi-select` take their choices from `<options>`:
+
+```xml
+<input-field type="single-select">
+    <name>deliveryMode</name>
+    <label>Delivery mode</label>
+    <defaultValue>standard</defaultValue>
+    <options>
+        <option>
+            <id>standard</id>
+            <name>Standard</name>
+            <name lang="de-DE">Standard</name>
+        </option>
+        <option>
+            <id>express</id>
+            <name>Express</name>
+        </option>
+    </options>
+</input-field>
+```
+
+Field names must be unique within the plugin, at least four characters, letters and digits only, and
+must not start with a digit. Add `cache-relevant="true"` to an `<input-field>` whose value changes
+Storefront output, so the HTTP cache is invalidated when a merchant edits it.
+
+### Embedding admin components with `<component>`
+
+`<component>` drops an existing Administration Vue component straight into the config page. This is how
+you get entity pickers and media uploads without writing an admin module.
+
+```xml
+<component name="sw-entity-single-select">
+    <name>defaultProductId</name>
+    <entity>product</entity>
+    <label>Default product</label>
+    <label lang="de-DE">Standardprodukt</label>
+</component>
+
+<component name="sw-entity-multi-id-select">
+    <name>excludedCategoryIds</name>
+    <entity>category</entity>
+    <label>Excluded categories</label>
+</component>
+
+<component name="sw-media-field">
+    <name>fallbackImage</name>
+    <label>Fallback image</label>
+</component>
+```
+
+| Component | Stores |
+|---|---|
+| `sw-entity-single-select` | One entity ID as a string |
+| `sw-entity-multi-id-select` | Array of entity IDs |
+| `sw-media-field` | One media ID |
+| `sw-text-editor` | HTML string |
+| `sw-snippet-field` | Snippet key, editable per language |
+
+Any child element other than `name` is passed to the component as a prop, which is how `<entity>` reaches
+`sw-entity-single-select`. A custom component works the same way as long as it is registered before the
+settings page renders:
+
+```xml
+<component name="my-plugin-config-widget">
+    <name>widgetValue</name>
+    <label>Custom widget</label>
+</component>
+```
+
+```js
+Shopware.Component.register('my-plugin-config-widget', {
+    template: '<mt-card :title="label"><!-- ... --></mt-card>',
+    props: ['value', 'label'],
+    // emit 'update:value' to write back into the plugin config
+});
+```
+
 Read config in PHP:
 
 ```php
