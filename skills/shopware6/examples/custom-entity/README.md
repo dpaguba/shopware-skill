@@ -1,156 +1,35 @@
 # Example: Complete Custom Entity Plugin
 
-This example shows a minimal but complete custom entity: `WishlistItem` — stores a product + customer pair.
+A minimal but runnable plugin with one custom DAL entity: `wishlist_item`, a customer/product pair.
+
+Every file in this directory is real source, not a snippet. Copy the tree into
+`custom/plugins/WishlistPlugin/` and run `bin/console plugin:install --activate WishlistPlugin`.
 
 ## Files
 
-```
-src/
-├── WishlistPlugin.php
-├── Migration/
-│   └── Migration1746000000CreateWishlistItemTable.php
-├── Core/Content/WishlistItem/
-│   ├── WishlistItemDefinition.php
-│   ├── WishlistItemEntity.php
-│   └── WishlistItemCollection.php
-└── Resources/config/
-    └── services.xml
-```
+| File | Purpose |
+|---|---|
+| [composer.json](composer.json) | Plugin metadata, `shopware-plugin-class`, PSR-4 autoload |
+| [src/WishlistPlugin.php](src/WishlistPlugin.php) | Bootstrap, drops the table on uninstall when user data is not kept |
+| [src/Migration/Migration1746000000CreateWishlistItemTable.php](src/Migration/Migration1746000000CreateWishlistItemTable.php) | Schema |
+| [src/Core/Content/WishlistItem/WishlistItemDefinition.php](src/Core/Content/WishlistItem/WishlistItemDefinition.php) | Field definitions |
+| [src/Core/Content/WishlistItem/WishlistItemEntity.php](src/Core/Content/WishlistItem/WishlistItemEntity.php) | Entity class |
+| [src/Core/Content/WishlistItem/WishlistItemCollection.php](src/Core/Content/WishlistItem/WishlistItemCollection.php) | Typed collection |
+| [src/Resources/config/services.xml](src/Resources/config/services.xml) | Registers the definition |
 
-## 1. Migration
+## Three things this example gets right
 
-```php
-<?php declare(strict_types=1);
+**Versioned foreign keys.** `product` has a composite primary key `(id, version_id)`. A foreign key to it
+needs both columns in SQL and a `ReferenceVersionField(ProductDefinition::class)` in the definition.
+Pointing a plain `FkField` at `product.id` alone produces a schema that DAL validation rejects.
 
-namespace VendorName\WishlistPlugin\Migration;
+**Migration timestamp range.** Since SW 6.7 `getCreationTimestamp()` is validated to be between 1 and
+2147483647. A larger value used to be clamped silently, which made migration order non-deterministic.
 
-use Doctrine\DBAL\Connection;
-use Shopware\Core\Framework\Migration\MigrationStep;
-
-class Migration1746000000CreateWishlistItemTable extends MigrationStep
-{
-    public function getCreationTimestamp(): int { return 1746000000; }
-
-    public function update(Connection $connection): void
-    {
-        $connection->executeStatement('
-            CREATE TABLE IF NOT EXISTS `wishlist_item` (
-                `id`          BINARY(16)  NOT NULL,
-                `customer_id` BINARY(16)  NOT NULL,
-                `product_id`  BINARY(16)  NOT NULL,
-                `created_at`  DATETIME(3) NOT NULL,
-                `updated_at`  DATETIME(3) NULL,
-                PRIMARY KEY (`id`),
-                KEY `fk.wishlist_item.customer_id` (`customer_id`),
-                KEY `fk.wishlist_item.product_id`  (`product_id`)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        ');
-    }
-
-    public function updateDestructive(Connection $connection): void {}
-}
-```
-
-## 2. Definition
-
-```php
-<?php declare(strict_types=1);
-
-namespace VendorName\WishlistPlugin\Core\Content\WishlistItem;
-
-use Shopware\Core\Checkout\Customer\CustomerDefinition;
-use Shopware\Core\Content\Product\ProductDefinition;
-use Shopware\Core\Framework\DataAbstractionLayer\EntityDefinition;
-use Shopware\Core\Framework\DataAbstractionLayer\Field\Flag\ApiAware;
-use Shopware\Core\Framework\DataAbstractionLayer\Field\Flag\PrimaryKey;
-use Shopware\Core\Framework\DataAbstractionLayer\Field\Flag\Required;
-use Shopware\Core\Framework\DataAbstractionLayer\Field\CreatedAtField;
-use Shopware\Core\Framework\DataAbstractionLayer\Field\FkField;
-use Shopware\Core\Framework\DataAbstractionLayer\Field\IdField;
-use Shopware\Core\Framework\DataAbstractionLayer\Field\ManyToOneAssociationField;
-use Shopware\Core\Framework\DataAbstractionLayer\Field\UpdatedAtField;
-use Shopware\Core\Framework\DataAbstractionLayer\FieldCollection;
-
-class WishlistItemDefinition extends EntityDefinition
-{
-    public const ENTITY_NAME = 'wishlist_item';
-
-    public function getEntityName(): string { return self::ENTITY_NAME; }
-    public function getEntityClass(): string { return WishlistItemEntity::class; }
-    public function getCollectionClass(): string { return WishlistItemCollection::class; }
-
-    protected function defineFields(): FieldCollection
-    {
-        return new FieldCollection([
-            (new IdField('id', 'id'))->addFlags(new ApiAware(), new PrimaryKey(), new Required()),
-            (new FkField('customer_id', 'customerId', CustomerDefinition::class))->addFlags(new ApiAware(), new Required()),
-            (new FkField('product_id', 'productId', ProductDefinition::class))->addFlags(new ApiAware(), new Required()),
-            new ManyToOneAssociationField('customer', 'customer_id', CustomerDefinition::class, 'id'),
-            new ManyToOneAssociationField('product', 'product_id', ProductDefinition::class, 'id'),
-            new CreatedAtField(),
-            new UpdatedAtField(),
-        ]);
-    }
-}
-```
-
-## 3. Entity
-
-```php
-<?php declare(strict_types=1);
-
-namespace VendorName\WishlistPlugin\Core\Content\WishlistItem;
-
-use Shopware\Core\Framework\DataAbstractionLayer\Entity;
-use Shopware\Core\Framework\DataAbstractionLayer\EntityIdTrait;
-
-class WishlistItemEntity extends Entity
-{
-    use EntityIdTrait;
-
-    protected string $customerId;
-    protected string $productId;
-
-    public function getCustomerId(): string { return $this->customerId; }
-    public function getProductId(): string { return $this->productId; }
-}
-```
-
-## 4. Collection
-
-```php
-<?php declare(strict_types=1);
-
-namespace VendorName\WishlistPlugin\Core\Content\WishlistItem;
-
-use Shopware\Core\Framework\DataAbstractionLayer\EntityCollection;
-
-/** @extends EntityCollection<WishlistItemEntity> */
-class WishlistItemCollection extends EntityCollection
-{
-    protected function getExpectedClass(): string { return WishlistItemEntity::class; }
-}
-```
-
-## 5. services.xml
-
-```xml
-<?xml version="1.0" ?>
-<container xmlns="http://symfony.com/schema/dic/services"
-           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-           xsi:schemaLocation="http://symfony.com/schema/dic/services
-           http://symfony.com/schema/dic/services/services-1.0.xsd">
-    <services>
-        <service id="VendorName\WishlistPlugin\Core\Content\WishlistItem\WishlistItemDefinition">
-            <tag name="shopware.entity.definition"/>
-        </service>
-    </services>
-</container>
-```
+**Uninstall cleanup.** Since SW 6.7 plugin migrations are deleted from the migration table *before*
+`uninstall()` runs, so dropping the table there lets a later reinstall replay the migration cleanly.
 
 ## Usage
-
-After installing and running migrations:
 
 ```php
 // Inject: wishlist_item.repository
@@ -165,5 +44,14 @@ $this->wishlistItemRepository->create([
 $criteria = new Criteria();
 $criteria->addFilter(new EqualsFilter('customerId', $customerId));
 $criteria->addAssociation('product');
+
 $items = $this->wishlistItemRepository->search($criteria, $context);
 ```
+
+`productVersionId` does not need to be passed: DAL fills it with `Defaults::LIVE_VERSION`.
+
+## Attribute-based alternative
+
+Since SW 6.6.3 the same entity can be declared with PHP attributes instead of a definition class, which
+removes the entity and collection boilerplate. See `references/advanced.md`. Note that the DAL attribute
+classes were made `final` in 6.7, so they cannot be extended.

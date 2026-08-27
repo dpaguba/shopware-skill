@@ -1,130 +1,40 @@
 # Example: Storefront Page Subscriber
 
-Inject custom data into the product detail page and display it in Twig.
+Adds a "related articles" box to the product detail page: a subscriber enriches the page struct, a Twig
+override renders it.
 
-## Goal
-
-Show a "related articles" box on product pages, loaded from a custom service.
+Every file in this directory is real source, not a snippet. Copy the tree into
+`custom/plugins/MyPlugin/` and run `bin/console plugin:install --activate MyPlugin`.
 
 ## Files
 
-```
-src/
-├── Subscriber/
-│   └── ProductPageSubscriber.php
-├── Service/
-│   └── RelatedArticlesService.php
-└── Resources/
-    ├── config/services.xml
-    └── views/storefront/page/product-detail/
-        └── index.html.twig
-```
+| File | Purpose |
+|---|---|
+| [composer.json](composer.json) | Plugin metadata and autoload |
+| [src/MyPlugin.php](src/MyPlugin.php) | Bootstrap |
+| [src/Subscriber/ProductPageSubscriber.php](src/Subscriber/ProductPageSubscriber.php) | Listens to `ProductPageLoadedEvent`, adds a page extension |
+| [src/Service/RelatedArticlesService.php](src/Service/RelatedArticlesService.php) | Loads the products |
+| [src/Resources/config/services.xml](src/Resources/config/services.xml) | DI wiring, `kernel.event_subscriber` tag |
+| [src/Resources/views/storefront/page/product-detail/index.html.twig](src/Resources/views/storefront/page/product-detail/index.html.twig) | Template override |
+| [src/Resources/snippet/en_GB/messages.en-GB.json](src/Resources/snippet/en_GB/messages.en-GB.json) | Snippets |
 
-## 1. Subscriber
+## Four things this example gets right
 
-```php
-<?php declare(strict_types=1);
+**Sales channel repository, not the plain one.** `sales_channel.product.repository` applies visibility,
+availability and the pricing context of the current sales channel. `product.repository` returns products
+the customer must not see and prices that ignore the customer group.
 
-namespace VendorName\MyPlugin\Subscriber;
+**Page extensions, not template globals.** `$page->addExtension('relatedArticles', ...)` keeps the data
+addressable as `page.extensions.relatedArticles` and does not collide with core variables.
 
-use Shopware\Storefront\Page\Product\ProductPageLoadedEvent;
-use Symfony\Component\EventDispatcher\EventSubscriberInterface;
-use VendorName\MyPlugin\Service\RelatedArticlesService;
+**`translated`, not raw fields.** `product.translated.name` resolves through the language inheritance
+chain; `product.name` can be null on an inherited translation.
 
-class ProductPageSubscriber implements EventSubscriberInterface
-{
-    public function __construct(
-        private readonly RelatedArticlesService $relatedArticlesService,
-    ) {}
+**Semantic markup.** The list is a `<ul>/<li>`. SW 6.7 converted core listings to real lists as part of
+the accessibility work, and a custom block that uses `<div>` stands out to screen readers.
 
-    public static function getSubscribedEvents(): array
-    {
-        return [ProductPageLoadedEvent::class => 'onProductPageLoaded'];
-    }
+## Extending vs decorating
 
-    public function onProductPageLoaded(ProductPageLoadedEvent $event): void
-    {
-        $product  = $event->getPage()->getProduct();
-        $context  = $event->getSalesChannelContext();
-
-        $articles = $this->relatedArticlesService->findRelated($product->getId(), $context);
-
-        $event->getPage()->addExtension('relatedArticles', $articles);
-    }
-}
-```
-
-## 2. Service
-
-```php
-<?php declare(strict_types=1);
-
-namespace VendorName\MyPlugin\Service;
-
-use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
-use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
-use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsFilter;
-use Shopware\Core\Framework\DataAbstractionLayer\EntitySearchResult;
-use Shopware\Core\System\SalesChannel\SalesChannelContext;
-
-class RelatedArticlesService
-{
-    public function __construct(
-        private readonly EntityRepository $productRepository,
-    ) {}
-
-    public function findRelated(string $productId, SalesChannelContext $context): EntitySearchResult
-    {
-        $criteria = new Criteria();
-        $criteria->addFilter(new EqualsFilter('active', true));
-        $criteria->setLimit(4);
-        // In real code: add relevance-based filter here
-
-        return $this->productRepository->search($criteria, $context->getContext());
-    }
-}
-```
-
-## 3. services.xml
-
-```xml
-<service id="VendorName\MyPlugin\Subscriber\ProductPageSubscriber">
-    <argument type="service" id="VendorName\MyPlugin\Service\RelatedArticlesService"/>
-    <tag name="kernel.event_subscriber"/>
-</service>
-
-<service id="VendorName\MyPlugin\Service\RelatedArticlesService">
-    <argument type="service" id="sales_channel.product.repository"/>
-</service>
-```
-
-## 4. Twig Template Override
-
-```twig
-{# src/Resources/views/storefront/page/product-detail/index.html.twig #}
-{% sw_extends '@Storefront/storefront/page/product-detail/index.html.twig' %}
-
-{% block page_product_detail %}
-    {{ parent() }}
-
-    {% if page.extensions.relatedArticles is not empty %}
-    <div class="container">
-        <h2 class="h4 mt-4 mb-3">Related Articles</h2>
-        <div class="row">
-            {% for product in page.extensions.relatedArticles %}
-            <div class="col-6 col-md-3 mb-3">
-                <a href="{{ seoUrl('frontend.detail.page', { productId: product.id }) }}">
-                    {% if product.cover.media %}
-                        <img src="{{ product.cover.media.url }}"
-                             alt="{{ product.name }}"
-                             class="img-fluid">
-                    {% endif %}
-                    <p class="mt-2">{{ product.name }}</p>
-                </a>
-            </div>
-            {% endfor %}
-        </div>
-    </div>
-    {% endif %}
-{% endblock %}
-```
+A subscriber is the right tool when you add data. When you need to change what a core service returns,
+decorate it instead. When you need to change the sequence of the cart calculation, write a cart
+processor. See `references/storefront.md` and `references/cart.md`.

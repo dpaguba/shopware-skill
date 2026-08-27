@@ -1,0 +1,29 @@
+{% sw_extends '@Storefront/storefront/page/product-detail/index.html.twig' %}
+
+{% block page_product_detail %}
+    {{ parent() }}
+
+    {% set relatedArticles = page.extensions.relatedArticles %}
+
+    {% if relatedArticles is not empty %}
+        <div class="container related-articles">
+            <h2 class="h4 mt-4 mb-3">{{ "myPlugin.relatedArticles.headline"|trans|sw_sanitize }}</h2>
+
+            <ul class="row list-unstyled">
+                {% for product in relatedArticles %}
+                    <li class="col-6 col-md-3 mb-3">
+                        <a href="{{ seoUrl('frontend.detail.page', { productId: product.id }) }}">
+                            {% if product.cover.media %}
+                                {% sw_thumbnails 'related-article-image-thumbnails' with {
+                                    media: product.cover.media,
+                                    sizes: { default: '300px' }
+                                } %}
+                            {% endif %}
+                            <p class="mt-2">{{ product.translated.name }}</p>
+                        </a>
+                    </li>
+                {% endfor %}
+            </ul>
+        </div>
+    {% endif %}
+{% endblock %}

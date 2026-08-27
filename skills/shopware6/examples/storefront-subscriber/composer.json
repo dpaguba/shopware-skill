@@ -1,0 +1,22 @@
+{
+    "name": "vendor-name/my-plugin",
+    "description": "Example Shopware 6 plugin that extends the product detail page",
+    "type": "shopware-platform-plugin",
+    "license": "MIT",
+    "require": {
+        "shopware/core": "~6.7.0",
+        "shopware/storefront": "~6.7.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "VendorName\\MyPlugin\\": "src/"
+        }
+    },
+    "extra": {
+        "shopware-plugin-class": "VendorName\\MyPlugin\\MyPlugin",
+        "label": {
+            "en-GB": "Related articles example",
+            "de-DE": "Beispiel: Ähnliche Artikel"
+        }
+    }
+}
