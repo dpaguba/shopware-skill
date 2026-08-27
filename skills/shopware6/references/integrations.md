@@ -4,126 +4,166 @@
 
 ## Payment Handlers
 
-### When to use which interface
+> **SW 6.7 breaking change.** `SynchronousPaymentHandlerInterface`, `AsynchronousPaymentHandlerInterface`,
+> `PreparedPaymentHandlerInterface`, `RefundPaymentHandlerInterface` and `RecurringPaymentHandlerInterface`
+> are deprecated and consolidated into a single `AbstractPaymentHandler`. Write new handlers against the
+> abstract class. The old interfaces are only relevant when maintaining a 6.6 branch.
 
-| Interface | Use when |
-|---|---|
-| `SynchronousPaymentHandlerInterface` | Payment result is immediate (credit card, prepayment confirmation) |
-| `AsynchronousPaymentHandlerInterface` | Customer is redirected to external provider (PayPal, Stripe redirect) |
-| `RecurringPaymentHandlerInterface` | Subscription billing |
+### AbstractPaymentHandler (SW 6.7+)
 
-### Synchronous Handler
+One class covers every payment flow. Which optional capabilities are active is decided by `supports()`:
+
+| Method | Required | Called |
+|---|---|---|
+| `supports()` | yes | Before `refund` and `recurring` to check capability |
+| `pay()` | yes | Every payment. Return `RedirectResponse` for redirect flows, `null` for direct capture |
+| `validate()` | no | Before the order is persisted. Throw to abort order creation |
+| `finalize()` | no | After the redirect returns. Only called when `pay()` returned a `RedirectResponse` |
+| `refund()` | no | Only if `supports(PaymentHandlerType::REFUND, ...)` is true |
+| `recurring()` | no | Only if `supports(PaymentHandlerType::RECURRING, ...)` is true |
+
+Handlers receive only the `orderTransactionId`, the `Request` and a `Context`. There is no
+`SalesChannelContext` any more: it may hold data that does not match the order (for example a customer
+address changed after checkout). Load whatever else you need yourself.
 
 ```php
 <?php declare(strict_types=1);
 
 namespace VendorName\PluginName\Payment;
 
-use Shopware\Core\Checkout\Payment\Cart\PaymentHandler\SynchronousPaymentHandlerInterface;
-use Shopware\Core\Checkout\Payment\Cart\SyncPaymentTransactionStruct;
+use Shopware\Core\Checkout\Order\OrderEntity;
+use Shopware\Core\Checkout\Payment\Cart\PaymentHandler\AbstractPaymentHandler;
+use Shopware\Core\Checkout\Payment\Cart\PaymentHandler\PaymentHandlerType;
+use Shopware\Core\Checkout\Payment\Cart\PaymentTransactionStruct;
 use Shopware\Core\Checkout\Payment\PaymentException;
-use Shopware\Core\Framework\Validation\DataBag\RequestDataBag;
-use Shopware\Core\System\SalesChannel\SalesChannelContext;
-use Psr\Log\LoggerInterface;
+use Shopware\Core\Framework\Context;
+use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
+use Shopware\Core\Framework\Struct\Struct;
+use Symfony\Component\HttpFoundation\RedirectResponse;
+use Symfony\Component\HttpFoundation\Request;
 
-class MyPaymentHandler implements SynchronousPaymentHandlerInterface
+class MyPaymentHandler extends AbstractPaymentHandler
 {
     public function __construct(
-        private readonly LoggerInterface $logger,
+        private readonly EntityRepository $orderTransactionRepository,
+        private readonly MyGateway $gateway,
     ) {}
 
+    public function supports(
+        PaymentHandlerType $type,
+        string $paymentMethodId,
+        Context $context
+    ): bool {
+        // Only refunds are supported, recurring is not
+        return $type === PaymentHandlerType::REFUND;
+    }
+
     public function pay(
-        SyncPaymentTransactionStruct $transaction,
-        RequestDataBag $dataBag,
-        SalesChannelContext $salesChannelContext
-    ): void {
-        $order       = $transaction->getOrder();
-        $totalAmount = $order->getAmountTotal();
-        $currency    = $salesChannelContext->getCurrency()->getIsoCode();
+        Request $request,
+        PaymentTransactionStruct $transaction,
+        Context $context,
+        ?Struct $validateStruct
+    ): ?RedirectResponse {
+        $order = $this->loadOrder($transaction->getOrderTransactionId(), $context);
 
-        try {
-            $result = $this->gateway->charge($totalAmount, $currency);
+        $result = $this->gateway->charge(
+            amount:   $order->getAmountTotal(),
+            currency: $order->getCurrency()?->getIsoCode() ?? 'EUR',
+        );
 
-            if (!$result->isSuccessful()) {
-                throw PaymentException::syncProcessInterrupted(
-                    $transaction->getOrderTransaction()->getId(),
-                    'Payment declined: ' . $result->getMessage()
-                );
-            }
-
-            $this->logger->info('Payment successful', [
-                'orderId'    => $order->getId(),
-                'amount'     => $totalAmount,
-                'externalId' => $result->getTransactionId(),
-            ]);
-        } catch (\Exception $e) {
-            throw PaymentException::syncProcessInterrupted(
-                $transaction->getOrderTransaction()->getId(),
-                $e->getMessage()
+        if (!$result->isSuccessful()) {
+            throw PaymentException::asyncProcessInterrupted(
+                $transaction->getOrderTransactionId(),
+                'Payment declined: ' . $result->getMessage()
             );
         }
+
+        // Direct capture: no redirect, finalize() will not be called
+        return null;
+    }
+
+    private function loadOrder(string $orderTransactionId, Context $context): OrderEntity
+    {
+        $criteria = new Criteria([$orderTransactionId]);
+        $criteria->addAssociation('order.currency');
+
+        $transaction = $this->orderTransactionRepository->search($criteria, $context)->first();
+
+        return $transaction->getOrder();
     }
 }
 ```
 
-### Asynchronous Handler
+### Redirect flow
+
+Return a `RedirectResponse` from `pay()`. Shopware then calls `finalize()` when the customer comes back
+via the return URL. `PaymentTransactionStruct::getReturnUrl()` provides that URL.
 
 ```php
-use Shopware\Core\Checkout\Payment\Cart\AsyncPaymentTransactionStruct;
-use Shopware\Core\Checkout\Payment\Cart\PaymentHandler\AsynchronousPaymentHandlerInterface;
-use Symfony\Component\HttpFoundation\RedirectResponse;
-use Symfony\Component\HttpFoundation\Request;
-use Shopware\Core\Framework\Validation\DataBag\RequestDataBag;
+public function pay(
+    Request $request,
+    PaymentTransactionStruct $transaction,
+    Context $context,
+    ?Struct $validateStruct
+): ?RedirectResponse {
+    $session = $this->gateway->createSession(
+        transactionId: $transaction->getOrderTransactionId(),
+        returnUrl:     $transaction->getReturnUrl(),
+    );
 
-class MyRedirectPaymentHandler implements AsynchronousPaymentHandlerInterface
-{
-    public function pay(
-        AsyncPaymentTransactionStruct $transaction,
-        RequestDataBag $dataBag,
-        SalesChannelContext $salesChannelContext
-    ): RedirectResponse {
-        $returnUrl = $transaction->getReturnUrl(); // Shopware's finalize URL
+    return new RedirectResponse($session->getPaymentUrl());
+}
 
-        $paymentUrl = $this->gateway->createSession(
-            amount:    $transaction->getOrder()->getAmountTotal(),
-            currency:  $salesChannelContext->getCurrency()->getIsoCode(),
-            returnUrl: $returnUrl,
+public function finalize(
+    Request $request,
+    PaymentTransactionStruct $transaction,
+    Context $context
+): void {
+    $status = $this->gateway->verifyPayment($request->query->get('transaction_id'));
+
+    if ($status !== 'paid') {
+        throw PaymentException::customerCanceled(
+            $transaction->getOrderTransactionId(),
+            'Payment not completed. Status: ' . $status
         );
+    }
+    // No exception thrown means Shopware transitions the transaction to paid
+}
+```
 
-        return new RedirectResponse($paymentUrl);
+`validate()` runs before the order exists and can carry data forward into `pay()` via the returned
+`Struct`, which arrives as `$validateStruct`:
+
+```php
+public function validate(Cart $cart, RequestDataBag $dataBag, SalesChannelContext $context): ?Struct
+{
+    $token = $dataBag->get('myGatewayToken');
+
+    if (!$token) {
+        throw PaymentException::validatePreparedPaymentInterrupted('Missing gateway token');
     }
 
-    public function finalize(
-        AsyncPaymentTransactionStruct $transaction,
-        Request $request,
-        SalesChannelContext $salesChannelContext
-    ): void {
-        $transactionId = $request->query->get('transaction_id');
-
-        $status = $this->gateway->verifyPayment($transactionId);
-
-        if ($status !== 'paid') {
-            throw PaymentException::asyncProcessInterrupted(
-                $transaction->getOrderTransaction()->getId(),
-                'Payment not completed. Status: ' . $status
-            );
-        }
-        // If no exception is thrown, Shopware marks the order as paid
-    }
+    return new ArrayStruct(['token' => $token]);
 }
 ```
 
 ### Register Payment Handler
 
+A single tag for every handler type. The `.sync` and `.async` variants are gone.
+
 ```xml
 <service id="VendorName\PluginName\Payment\MyPaymentHandler">
-    <argument type="service" id="logger"/>
-    <tag name="shopware.payment.method.sync"/>
-    <!-- OR: <tag name="shopware.payment.method.async"/> -->
+    <argument type="service" id="order_transaction.repository"/>
+    <argument type="service" id="VendorName\PluginName\Gateway\MyGateway"/>
+    <tag name="shopware.payment.method"/>
 </service>
 ```
 
 ### Install Payment Method in Plugin
+
+`technicalName` is **required** since SW 6.7 (the `technical_name` column is non-nullable for both
+`payment_method` and `shipping_method`). Creating a method without it fails.
 
 ```php
 public function install(InstallContext $installContext): void
@@ -153,6 +193,7 @@ private function addPaymentMethod(Context $context): void
     $paymentMethodRepository->create([
         [
             'handlerIdentifier' => MyPaymentHandler::class,
+            'technicalName'     => 'payment_myplugin_gateway', // required since 6.7
             'name'              => 'My Payment',
             'description'       => 'Pay via My Gateway',
             'translations'      => [
@@ -186,6 +227,12 @@ private function setPaymentMethodActive(bool $active, Context $context): void
     ], $context);
 }
 ```
+
+### Legacy handlers (SW 6.6 and older)
+
+`SynchronousPaymentHandlerInterface::pay(SyncPaymentTransactionStruct, RequestDataBag, SalesChannelContext)`
+and `AsynchronousPaymentHandlerInterface::pay(...): RedirectResponse` plus `finalize(...)`, registered with
+`shopware.payment.method.sync` / `.async`. Only use these when the plugin must run on 6.6.
 
 ---
 
