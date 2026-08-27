@@ -12,7 +12,11 @@ Create `src/Resources/app/administration/main.js`:
 import './src/module/my-module';
 ```
 
-Webpack picks this up automatically via `build-administration.sh`.
+The build picks this up automatically via `build-administration.sh`.
+
+> **SW 6.7 breaking change.** The Administration build moved from Webpack to **Vite**. A plugin that ships
+> a `webpack.config.js` must migrate it to `vite.config.mts`. Because the build output differs, an admin
+> extension usually needs a separate plugin release for 6.7 and for 6.6.
 
 ---
 
@@ -242,20 +246,69 @@ Use in templates:
 
 ## Common Admin Components
 
+SW 6.7 replaced the basic `sw-*` components with the **Meteor Component Library** (`mt-*`). The old
+components are removed, not deprecated. Shopware-specific components that have no Meteor equivalent
+(`sw-page`, `sw-entity-listing`, `sw-data-grid`, `sw-entity-multi-select`) keep their names.
+
 | Component | Purpose |
 |---|---|
 | `<sw-page>` | Full page layout with smart bar |
-| `<sw-card>` | Content card container |
-| `<sw-entity-listing>` | Paginated data grid |
+| `<sw-entity-listing>` | Paginated data grid bound to a repository |
 | `<sw-data-grid>` | Data grid without entity binding |
-| `<sw-button>` | Standard button |
-| `<sw-modal>` | Modal dialog |
-| `<sw-text-field>` / `<sw-number-field>` / `<sw-switch-field>` | Typed form fields (deprecated `<sw-field>` wrapper removed in SW 6.7, avoid in 6.5+) |
-| `<sw-select>` | Dropdown select |
 | `<sw-entity-multi-select>` | Multi entity picker |
-| `<sw-loader>` | Loading spinner |
-| `<sw-alert>` | Alert/notification box |
-| `<sw-tabs>` | Tab navigation |
+| `<sw-modal>` | Modal dialog |
+| `<mt-card>` | Content card container |
+| `<mt-button>` | Standard button |
+| `<mt-text-field>` / `<mt-number-field>` / `<mt-switch>` | Typed form fields |
+| `<mt-select>` | Dropdown select |
+| `<mt-checkbox>` / `<mt-datepicker>` / `<mt-colorpicker>` | Typed inputs |
+| `<mt-loader>` | Loading spinner |
+| `<mt-banner>` | Alert / notification box |
+| `<mt-tabs>` | Tab navigation |
+| `<mt-icon>` | Icon |
+| `<mt-tooltip>` | Tooltip (plain strings and HTML only, no Vue components inside) |
+
+### sw-* to mt-* migration map
+
+| Removed in 6.7 | Replacement |
+|---|---|
+| `sw-button` | `mt-button` |
+| `sw-card` | `mt-card` |
+| `sw-icon` | `mt-icon` |
+| `sw-text-field` | `mt-text-field` |
+| `sw-textarea-field` | `mt-textarea` |
+| `sw-number-field` | `mt-number-field` |
+| `sw-switch-field` | `mt-switch` |
+| `sw-checkbox-field` | `mt-checkbox` |
+| `sw-select-field` | `mt-select` |
+| `sw-email-field` | `mt-email-field` |
+| `sw-url-field` | `mt-url-field` |
+| `sw-password-field` | `mt-password-field` |
+| `sw-datepicker` | `mt-datepicker` |
+| `sw-colorpicker` | `mt-colorpicker` |
+| `sw-progress-bar` | `mt-progress-bar` |
+| `sw-loader` | `mt-loader` |
+| `sw-tabs` | `mt-tabs` (`isVertical` renamed to `vertical`, `alignRight` removed) |
+| `sw-popover` | `mt-floating-ui` (no `zIndex`, `resizeWidth`, `popoverClass`; not open by default) |
+| `sw-external-link` | `mt-external-link` (no `icon` prop) |
+| `sw-skeleton-bar` | `mt-skeleton-bar` |
+| `sw-alert` | `mt-banner` |
+
+**Prop and event renames that apply across all `mt-*` fields:**
+
+| Old (`sw-*`) | New (`mt-*`) |
+|---|---|
+| `:value="x"` | `:model-value="x"` |
+| `v-model:value="x"` | `v-model="x"` |
+| `@update:value` | `@update:model-value` |
+| `<template #label>` slot | `label` prop |
+| `<template #hint>` slot | removed |
+| `size="medium"` | removed value |
+| `isInvalid` prop | removed |
+| `id`, `ghostValue`, `padded` props | removed |
+
+`mt-button` also lost the `ghost`, `danger`, `ghost-danger`, `contrast` and `context` variants and the
+`router-link` prop. Use `variant` plus a `@click` handler with `this.$router.push()` instead.
 
 ---
 
@@ -533,9 +586,9 @@ Shopware.Module.register('my-plugin-webhook', {
 
 ## State Management
 
-**SW 6.6+:** Use Pinia via `Shopware.Store.register()` for new modules. The Vuex-based `Shopware.State` API is deprecated in 6.6 and will be removed in 6.7.
+**SW 6.7:** Pinia is the only option. The Vue 2 compatibility layer and the Vuex-based `Shopware.State` API were removed. On 6.6 `Shopware.State` still works but is deprecated.
 
-### Pinia (SW 6.6+, recommended)
+### Pinia (SW 6.6+, only option in 6.7)
 
 ```js
 Shopware.Store.register({
@@ -554,32 +607,21 @@ methods: {
 },
 ```
 
-### Vuex (SW 6.5, deprecated in 6.6)
+### Vuex (removed in 6.7, legacy 6.5/6.6 only)
 
 ```js
 Shopware.State.registerModule('myModule', {
     namespaced: true,
-    state: () => ({
-        myData: null,
-    }),
+    state: () => ({ myData: null }),
     mutations: {
-        setMyData(state, data) {
-            state.myData = data;
-        },
-    },
-    getters: {
-        myData: (state) => state.myData,
+        setMyData(state, data) { state.myData = data; },
     },
 });
 
-computed: {
-    myData() {
-        return Shopware.State.get('myModule').myData;
-    },
-},
-methods: {
-    updateData(data) {
-        Shopware.State.commit('myModule/setMyData', data);
-    },
-},
+// read: Shopware.State.get('myModule').myData
+// write: Shopware.State.commit('myModule/setMyData', data)
 ```
+
+When porting to 6.7, the Vuex helper functions were renamed as well: `mapState` became `mapVuexState`,
+and the equivalent Pinia helpers took over the original names. `vue-i18n` was upgraded to v10, which
+removed the standalone `tc` function; `$tc` still exists on components but delegates to `t`.

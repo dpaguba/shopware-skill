@@ -271,7 +271,7 @@ describe('MyComponent', () => {
     beforeEach(() => {
         wrapper = shallowMount(MyComponent, {
             global: {
-                stubs: ['sw-card', 'sw-button'],
+                stubs: ['mt-card', 'mt-button'],
             },
         });
     });

@@ -605,9 +605,9 @@ methods: {
         {# Show premium UI #}
         <my-premium-component />
     {% else %}
-        <sw-button @click="requestPurchase">
+        <mt-button @click="requestPurchase">
             {{ $tc('my-plugin.iap.unlockAdvanced') }}
-        </sw-button>
+        </mt-button>
     {% endif %}
 {% endblock %}
 ```
