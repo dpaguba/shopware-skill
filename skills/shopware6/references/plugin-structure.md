@@ -292,8 +292,9 @@ class MyTaskHandler extends ScheduledTaskHandler
 {
     public function __construct(
         EntityRepository $scheduledTaskRepository,
+        LoggerInterface $logger,               // required since SW 6.7
     ) {
-        parent::__construct($scheduledTaskRepository);
+        parent::__construct($scheduledTaskRepository, $logger);
     }
 
     public function run(): void
@@ -302,11 +303,20 @@ class MyTaskHandler extends ScheduledTaskHandler
 }
 ```
 
-Register task in `services.xml`:
+> **SW 6.7 breaking change.** `ScheduledTaskHandler::__construct()` takes a `Psr\Log\LoggerInterface` as
+> its second argument. A 6.6 handler that passes only the repository fails to instantiate on 6.7.
+
+Register task and handler in `services.xml`:
 
 ```xml
 <service id="VendorName\PluginName\ScheduledTask\MyTask">
     <tag name="shopware.scheduled.task"/>
+</service>
+
+<service id="VendorName\PluginName\ScheduledTask\MyTaskHandler">
+    <argument type="service" id="scheduled_task.repository"/>
+    <argument type="service" id="logger"/>
+    <tag name="messenger.message_handler"/>
 </service>
 ```
 
