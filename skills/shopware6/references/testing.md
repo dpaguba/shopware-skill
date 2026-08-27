@@ -469,7 +469,7 @@ Shopware's `ProductBuilder` provides a fluent API for creating complex product t
 
 ```php
 use Shopware\Core\Content\Test\Product\ProductBuilder;
-use Shopware\Core\Framework\Test\IdsCollection;
+use Shopware\Core\Test\Stub\Framework\IdsCollection;
 
 class ProductIntegrationTest extends TestCase
 {
@@ -513,6 +513,10 @@ class ProductIntegrationTest extends TestCase
 ```
 
 ### IdsCollection
+
+> **SW 6.7 namespace change.** `Shopware\Core\Framework\Test\IdsCollection` was removed. The class now
+> lives at `Shopware\Core\Test\Stub\Framework\IdsCollection`. `ProductBuilder` did **not** move and stays
+> at `Shopware\Core\Content\Test\Product\ProductBuilder`.
 
 `IdsCollection` is a stable UUID registry for tests. Using it ensures IDs are consistent across creation and assertion:
 
