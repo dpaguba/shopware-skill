@@ -349,6 +349,94 @@ class MyService
 
 ---
 
+## Choosing the execution mechanism
+
+Four mechanisms cover almost everything a plugin needs to run. Picking the wrong one is the most common
+source of slow checkouts and lost work.
+
+| Mechanism | Runs | Failure behaviour | Pick when |
+|---|---|---|---|
+| Symfony event subscriber | Synchronously, inside the request | Exception propagates and can break the request | You must influence the result before the response is sent |
+| Message queue (Messenger) | Asynchronously, in a worker | Retried, then moved to the failure transport | The work is slow, external, or may fail without harming the request |
+| Scheduled task | Periodically, in a worker | Retried on the next run | The work is recurring and time based, not event based |
+| Console command | Manually or from cron/CI | Visible in the terminal exit code | An operator or a pipeline triggers it |
+
+### Symfony events
+
+Use for anything that changes what the current request produces: enriching a page, adding line items,
+validating a cart, modifying an entity payload before it is written.
+
+```php
+class MySubscriber implements EventSubscriberInterface
+{
+    public static function getSubscribedEvents(): array
+    {
+        return [ProductPageLoadedEvent::class => 'onProductPageLoaded'];
+    }
+
+    public function onProductPageLoaded(ProductPageLoadedEvent $event): void
+    {
+        $event->getPage()->addExtension('myData', new ArrayStruct(['foo' => 'bar']));
+    }
+}
+```
+
+Rules of thumb: never call an external API from a subscriber that runs during checkout, never write large
+amounts of data, and never swallow exceptions to "make it safe". If the work can fail independently of
+the request, it belongs in the queue.
+
+### Message queue
+
+Use for external HTTP calls, mail dispatch, imports, indexing, image processing, anything slow. Dispatch
+from a subscriber, handle in a worker.
+
+```php
+// Message: plain data only, must be serialisable
+class SyncOrderMessage
+{
+    public function __construct(public readonly string $orderId) {}
+}
+
+// Dispatch
+class OrderPlacedSubscriber implements EventSubscriberInterface
+{
+    public function __construct(private readonly MessageBusInterface $bus) {}
+
+    public function onOrderPlaced(CheckoutOrderPlacedEvent $event): void
+    {
+        $this->bus->dispatch(new SyncOrderMessage($event->getOrder()->getId()));
+    }
+}
+
+// Handle
+#[AsMessageHandler]
+class SyncOrderHandler
+{
+    public function __construct(private readonly MyGateway $gateway) {}
+
+    public function __invoke(SyncOrderMessage $message): void
+    {
+        $this->gateway->sync($message->orderId);
+    }
+}
+```
+
+Put IDs in the message, never entities: the payload is serialised, and by the time the worker picks it up
+the entity may have changed. Workers need `bin/console messenger:consume` running; without a worker the
+message sits in the queue and nothing happens, which is the usual explanation for "my handler never runs".
+
+### Scheduled tasks
+
+A scheduled task is a message dispatched by Shopware on an interval. Use it for cleanup, periodic sync,
+recalculation. Do not use it as a poor substitute for a queue: an interval of 60 seconds still depends on
+a running worker and gives no per-item retry.
+
+### Console commands
+
+Use for operator-facing tooling: one-off migrations, diagnostics, manual reindexing, anything run from a
+deploy pipeline. A command should be a thin wrapper around a service that the queue can also call, so the
+same logic is reachable both ways.
+
 ## Scheduled Tasks
 
 ```php
