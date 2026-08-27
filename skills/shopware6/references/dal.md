@@ -243,7 +243,59 @@ $byManufacturer = $result->getAggregations()->get('by-manufacturer'); // TermsRe
 
 ## Custom Fields
 
-Custom fields are schema-less key/value storage on existing entities. Create them via API or through a plugin:
+Custom fields are schema-less key/value storage on existing entities. Since SW 6.7.13 the preferred way to
+ship them is **declarative**, in `src/Resources/config/custom-fields.xml`. The programmatic API still
+works and is what you need on 6.6 or when the set is built at runtime.
+
+### Declarative (SW 6.7.13+, recommended)
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<custom-fields xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/shopware/shopware/trunk/src/Core/System/CustomField/Schema/custom-fields-1.0.xsd">
+    <custom-field-set>
+        <name>swag_example_set</name>
+        <label>Example custom field set</label>
+        <label lang="de-DE">Beispiel-Zusatzfeld-Set</label>
+        <related-entities>
+            <product/>
+        </related-entities>
+        <fields>
+            <int name="swag_example_size">
+                <label>Size</label>
+                <label lang="de-DE">Größe</label>
+                <position>1</position>
+            </int>
+            <single-select name="swag_example_mode">
+                <label>Mode</label>
+                <options>
+                    <option value="fast">
+                        <name>Fast</name>
+                    </option>
+                </options>
+            </single-select>
+        </fields>
+    </custom-field-set>
+</custom-fields>
+```
+
+Field elements: `int`, `float`, `text`, `text-area`, `bool`, `datetime`, `single-select`, `multi-select`,
+`single-entity-select`, `multi-entity-select`, `color-picker`, `media-selection`, `price`.
+
+Common child elements on every field: `label`, `help-text`, `required`, `position`, `placeholder`,
+`allow-customer-write`, `allow-cart-expose`, `include-in-search`. Numeric fields add `min`, `max`, `steps`;
+entity selects add `entity`.
+
+Custom field names are **global across the shop**, so prefix both the set name and every field name with
+your vendor short code. Scaffold a starting file with
+`bin/console plugin:create --create-custom-fieldset`.
+
+On uninstall without keeping user data, the plugin's declared field sets are removed automatically.
+
+> **Apps:** the same file works at the app root. Declaring `<custom-fields>` inline in `manifest.xml` is
+> deprecated since 6.7.13 and will be removed in 6.8.
+
+### Programmatic (any version)
 
 ```php
 $customFieldSetRepository->create([

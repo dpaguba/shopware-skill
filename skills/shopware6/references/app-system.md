@@ -96,6 +96,9 @@ custom/apps/MyVendorApp/
     </admin>
 
     <!-- Custom fields added to existing entities -->
+    <!-- Deprecated since SW 6.7.13, removed in 6.8: move this block to a separate
+         Resources/config/custom-fields.xml at the app root, same syntax.
+         See references/dal.md for the field element list. -->
     <custom-fields>
         <custom-field-set>
             <name>my_app_product_fields</name>
