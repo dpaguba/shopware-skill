@@ -236,42 +236,62 @@ and `AsynchronousPaymentHandlerInterface::pay(...): RedirectResponse` plus `fina
 
 ---
 
-## Shipping Method Handler
+## Shipping Costs
+
+There is **no** `shopware.shipping_method.calculator` tag in Shopware 6. Shipping cost logic has three
+levels, pick the lowest one that solves the problem:
+
+| Level | Mechanism | Use when |
+|---|---|---|
+| Config | `shipping_method_price` records (Administration: price matrix) | Costs depend on weight, price, quantity or a rule. No code needed |
+| Rules | Rule Builder condition + price matrix | The condition is business logic the merchant should control |
+| Code | Custom `CartProcessorInterface` running after `DeliveryProcessor` | Costs come from an external carrier API or logic the matrix cannot express |
+
+### Custom cart processor for shipping costs
+
+`DeliveryProcessor` is registered with `priority: -5000`. Register below that so deliveries already exist
+and carry calculated costs you can overwrite.
 
 ```php
 <?php declare(strict_types=1);
 
-namespace VendorName\PluginName\Shipping;
+namespace VendorName\PluginName\Cart;
 
-use Shopware\Core\Checkout\Cart\Delivery\Struct\DeliveryCollection;
+use Shopware\Core\Checkout\Cart\Cart;
+use Shopware\Core\Checkout\Cart\CartBehavior;
+use Shopware\Core\Checkout\Cart\CartDataCollection;
+use Shopware\Core\Checkout\Cart\CartProcessorInterface;
 use Shopware\Core\Checkout\Cart\Price\Struct\CalculatedPrice;
 use Shopware\Core\Checkout\Cart\Tax\Struct\CalculatedTaxCollection;
 use Shopware\Core\Checkout\Cart\Tax\Struct\TaxRuleCollection;
-use Shopware\Core\Checkout\Shipping\Cart\ShippingMethodPriceCalculator;
 use Shopware\Core\System\SalesChannel\SalesChannelContext;
 
-class MyShippingCalculator
+class WeightBasedShippingProcessor implements CartProcessorInterface
 {
-    public function calculate(
-        DeliveryCollection $deliveries,
-        SalesChannelContext $context
-    ): void {
-        foreach ($deliveries as $delivery) {
-            $shippingMethod = $delivery->getShippingMethod();
+    private const TECHNICAL_NAME = 'shipping_myplugin_weight';
 
-            if ($shippingMethod->getHandlerIdentifier() !== static::class) {
+    public function process(
+        CartDataCollection $data,
+        Cart $original,
+        Cart $toCalculate,
+        SalesChannelContext $context,
+        CartBehavior $behavior
+    ): void {
+        foreach ($toCalculate->getDeliveries() as $delivery) {
+            if ($delivery->getShippingMethod()->getTechnicalName() !== self::TECHNICAL_NAME) {
                 continue;
             }
 
-            $weight = array_sum(array_map(
-                fn($pos) => ($pos->getLineItem()->getDeliveryInformation()?->getWeight() ?? 0.0) * $pos->getQuantity(),
-                $delivery->getPositions()->getElements()
-            ));
+            $weight = 0.0;
+            foreach ($delivery->getPositions() as $position) {
+                $itemWeight = $position->getLineItem()->getDeliveryInformation()?->getWeight() ?? 0.0;
+                $weight += $itemWeight * $position->getQuantity();
+            }
 
-            $price = match(true) {
-                $weight <= 1.0  => 4.99,
-                $weight <= 5.0  => 8.99,
-                default         => 14.99,
+            $price = match (true) {
+                $weight <= 1.0 => 4.99,
+                $weight <= 5.0 => 8.99,
+                default        => 14.99,
             };
 
             $delivery->setShippingCosts(new CalculatedPrice(
@@ -285,13 +305,34 @@ class MyShippingCalculator
 }
 ```
 
-Register in `services.xml`:
-
 ```xml
-<service id="VendorName\PluginName\Shipping\MyShippingCalculator">
-    <tag name="shopware.shipping_method.calculator"/>
+<service id="VendorName\PluginName\Cart\WeightBasedShippingProcessor">
+    <tag name="shopware.cart.processor" priority="-6000"/>
 </service>
 ```
+
+Match on `technicalName`, not on `handlerIdentifier`: shipping methods have no handler class, and
+`technicalName` is required for them since SW 6.7.
+
+### Install a shipping method
+
+```php
+$this->container->get('shipping_method.repository')->create([
+    [
+        'name'                 => 'Weight based',
+        'technicalName'        => 'shipping_myplugin_weight', // required since 6.7
+        'active'               => false,
+        'deliveryTimeId'       => $deliveryTimeId,
+        'availabilityRuleId'   => $ruleId,
+        'prices'               => [
+            ['currencyId' => Defaults::CURRENCY, 'gross' => 4.99, 'net' => 4.19, 'quantityStart' => 1],
+        ],
+    ],
+], $context);
+```
+
+For taxes on the shipping cost, resolve the tax rules from the delivery positions instead of passing an
+empty `TaxRuleCollection`, otherwise the shipping cost is treated as tax free.
 
 ---
 
