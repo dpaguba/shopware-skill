@@ -1,4 +1,4 @@
-# Themes — Creating and Configuring Shopware 6 Themes
+# Themes: Creating and Configuring Shopware 6 Themes
 
 Themes customize storefront appearance through template overrides, SCSS variables, JavaScript, and a merchantfacing configuration UI. Themes are plugins that implement `ThemeInterface`.
 
@@ -13,6 +13,10 @@ bin/console plugin:install --activate SwagMyTheme
 bin/console theme:change   # assign to sales channel
 ```
 
+**SW 6.7.14+:** `theme:create` also accepts `--with-config` (`config.xml`), `--with-snippets` (storefront snippet
+files), `--with-scss` (SCSS 7-1 folder structure) and `--full` for all three. The generated `composer.json` now
+gets a real package name (`custom/<theme-name>`) and pins `shopware/core`.
+
 ---
 
 ## Directory Structure
@@ -21,10 +25,12 @@ bin/console theme:change   # assign to sales channel
 SwagMyTheme/
 ├── composer.json
 └── src/
-    ├── SwagMyTheme.php         # Bootstrap — implements ThemeInterface
+    ├── SwagMyTheme.php         # Bootstrap, implements ThemeInterface
     └── Resources/
         ├── theme.json          # Required: metadata, assets, config fields
         └── app/
+            ├── administration/src/snippet/
+            │   └── en.json      # theme config labels (snippet keys)
             └── storefront/
                 └── src/
                     ├── main.js
@@ -47,16 +53,14 @@ use Shopware\Storefront\Framework\ThemeInterface;
 
 class SwagMyTheme extends Plugin implements ThemeInterface
 {
-    public function getThemeConfigPath(): string
-    {
-        return 'theme.json';
-    }
 }
 ```
 
+`ThemeInterface` is an empty marker interface. The configuration is always read from `src/Resources/theme.json`.
+
 ---
 
-## theme.json — Complete Structure
+## theme.json: Complete Structure
 
 ```json
 {
@@ -76,40 +80,23 @@ class SwagMyTheme extends Plugin implements ThemeInterface
 
     "style": [
         "app/storefront/src/scss/overrides.scss",
+        "@Storefront",
         "app/storefront/src/scss/base.scss"
     ],
 
     "script": [
+        "@Storefront",
         "app/storefront/dist/storefront/js/swag-my-theme/swag-my-theme.js"
     ],
 
     "asset": [
+        "@Storefront",
         "app/storefront/src/assets"
     ],
 
     "config": {
-        "blocks": {
-            "colors": {
-                "label": {
-                    "en-GB": "Colors",
-                    "de-DE": "Farben"
-                }
-            },
-            "typography": {
-                "label": {
-                    "en-GB": "Typography"
-                }
-            }
-        },
-        "sections": {
-            "colorsSection": {
-                "label": { "en-GB": "Brand Colors" },
-                "block": "colors"
-            }
-        },
         "fields": {
             "sw-color-brand-primary": {
-                "label": { "en-GB": "Primary Color", "de-DE": "Primärfarbe" },
                 "type": "color",
                 "value": "#008490",
                 "editable": true,
@@ -118,26 +105,22 @@ class SwagMyTheme extends Plugin implements ThemeInterface
                 "scss": true
             },
             "sw-color-brand-secondary": {
-                "label": { "en-GB": "Secondary Color" },
                 "type": "color",
                 "value": "#526e7f",
                 "block": "colors"
             },
             "sw-font-family-base": {
-                "label": { "en-GB": "Base Font" },
                 "type": "fontFamily",
                 "value": "'Open Sans', sans-serif",
                 "block": "typography",
                 "scss": true
             },
             "sw-font-size-base": {
-                "label": { "en-GB": "Base Font Size" },
                 "type": "text",
                 "value": "16px",
                 "block": "typography"
             },
             "sw-logo-desktop": {
-                "label": { "en-GB": "Desktop Logo" },
                 "type": "media",
                 "value": "app/storefront/src/assets/logo.png",
                 "block": "colors"
@@ -147,11 +130,45 @@ class SwagMyTheme extends Plugin implements ThemeInterface
 }
 ```
 
+Leaving out `@Storefront` in `style`, `script` or `asset` drops the Storefront's own CSS, JS or assets from the
+compiled theme.
+
+### Labels: admin snippets, not theme.json (SW 6.7)
+
+Inline `label` / `helpText` objects on fields (and label-only `blocks` / `sections` entries) are deprecated in 6.7
+and removed in 6.8. The theme manager reads admin snippets under
+`sw-theme.<TechnicalName>.<tab>.<block>.<section>.<field>.label` (`.helpText` for help texts), where an unset tab,
+block or section is `default` and `<TechnicalName>` is the theme's technical name (`Storefront` for the core theme):
+
+```json
+{
+    "sw-theme": {
+        "SwagMyTheme": {
+            "default": {
+                "colors": {
+                    "label": "Colors",
+                    "colorsSection": {
+                        "label": "Brand Colors",
+                        "sw-color-brand-primary": { "label": "Primary Color" }
+                    },
+                    "default": {
+                        "sw-color-brand-secondary": { "label": "Secondary Color" }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+Put it in `src/Resources/app/administration/src/snippet/en.json` (`en-GB.json` before 6.7.3); no admin `main.js`
+is needed. On 6.6 only the inline `label` objects work.
+
 ### Field Types
 
 | Type | Purpose |
 |------|---------|
-| `color` | Color picker — injects as SCSS variable |
+| `color` | Color picker, injects as SCSS variable |
 | `text` | Text input |
 | `number` | Number input |
 | `fontFamily` | Font family picker |
@@ -166,8 +183,8 @@ Fields with `"scss": true` (default) are injected as SCSS variables automaticall
 
 ### Config values as CSS custom properties (SW 6.7.11+)
 
-Every theme config field that is not marked `scss: false` is exposed as a native custom property, so
-runtime theming no longer requires recompiling SCSS:
+Every theme config field that is not marked `scss: false` (except `media` fields) is exposed as a native custom
+property, so runtime theming no longer requires recompiling SCSS:
 
 ```css
 .btn-primary {
@@ -188,20 +205,15 @@ runtime theming no longer requires recompiling SCSS:
 
 ---
 
-## SCSS — Bootstrap Variable Overrides
+## SCSS: Bootstrap Variable Overrides
 
 `overrides.scss` is compiled first and can override Bootstrap and Shopware variables:
 
 ```scss
-// overrides.scss — loaded before Storefront SCSS
+// overrides.scss: loaded before Storefront SCSS
 $font-family-base:    'Open Sans', sans-serif;
 $font-size-base:      1rem;
 $line-height-base:    1.6;
-
-$sw-color-brand-primary:   #008490;
-$sw-color-brand-secondary: #526e7f;
-$sw-color-success:         #3cc261;
-$sw-color-danger:          #e52427;
 
 $grid-breakpoints: (
     xs: 0,
@@ -213,10 +225,14 @@ $grid-breakpoints: (
 );
 ```
 
+Do not set theme config variables (`$sw-color-brand-primary`, `$sw-color-success`, ...) here. They are injected
+before `overrides.scss`, so a value set in this file silently overrides what the merchant configures in the Admin;
+change their default via `value` in `theme.json` instead.
+
 Custom styles in `base.scss`:
 
 ```scss
-// base.scss — runs after Storefront SCSS
+// base.scss: runs after Storefront SCSS
 .my-theme-header {
     background: $sw-color-brand-primary;
     color: white;
@@ -243,6 +259,10 @@ In `theme.json`:
 }
 ```
 
+**SW 6.7.15+:** the theme also inherits the storefront snippets of every theme listed in `configInheritance`
+(snippets of intermediate themes used to be dropped), and `theme.parent_theme_id` points to the last, nearest entry. Run `bin/console theme:refresh` to apply it
+outside a plugin update.
+
 In `views` array, order defines override priority (last wins):
 ```json
 {
@@ -258,21 +278,27 @@ In `views` array, order defines override priority (last wins):
 
 ## Read Theme Config in PHP
 
+Theme config is stored per theme, not in the system config, so `SystemConfigService` cannot read it. Use the
+accessor behind the Twig `theme_config()` function:
+
 ```php
-use Shopware\Core\System\SystemConfig\SystemConfigService;
+use Shopware\Core\SalesChannelRequest;
+use Shopware\Core\System\SalesChannel\SalesChannelContext;
+use Shopware\Storefront\Theme\ThemeConfigValueAccessor;
+use Symfony\Component\HttpFoundation\Request;
 
 class MyService
 {
     public function __construct(
-        private readonly SystemConfigService $systemConfig,
+        private readonly ThemeConfigValueAccessor $themeConfig,
     ) {}
 
-    public function getPrimaryColor(string $salesChannelId): string
+    public function getPrimaryColor(Request $request, SalesChannelContext $context): ?string
     {
-        return $this->systemConfig->getString(
-            'SwagMyTheme.config.sw-color-brand-primary',
-            $salesChannelId
-        );
+        $themeId = $request->attributes->get(SalesChannelRequest::ATTRIBUTE_THEME_ID);
+        $value = $this->themeConfig->get('sw-color-brand-primary', $context, $themeId);
+
+        return \is_string($value) ? $value : null;
     }
 }
 ```
@@ -289,11 +315,13 @@ Theme config variables injected with `scss: true` are available as CSS variables
 </style>
 ```
 
-Or read via `shopware.config`:
+Or read the value directly:
 
 ```twig
-{% set primaryColor = shopware.config['SwagMyTheme.config.sw-color-brand-primary'] %}
+{% set primaryColor = theme_config('sw-color-brand-primary') %}
 ```
+
+`config('SwagMyTheme.config.key')` reads the plugin's `config.xml` values (system config), not theme fields.
 
 ---
 
@@ -309,9 +337,14 @@ bin/console theme:change
 # Refresh theme config (after theme.json changes)
 bin/console theme:refresh
 
-# Dump theme config to see all variables
+# Dump theme config to var/theme-files.json (used by the watcher and dev server)
 bin/console theme:dump
 ```
+
+Each compile writes to a new `public/theme/<hash>` directory. The daily `theme.delete_files` scheduled task removes
+unused ones 24 to 48 hours after the switch (SW 6.7.15.1). `theme:compile` and `theme:change` no longer clean up
+themselves; their `--no-cleanup` option (added in 6.7.14) is a deprecated no-op and fails in 6.8, so drop it from
+deploy scripts.
 
 ---
 
@@ -342,3 +375,6 @@ Themes follow the same Twig inheritance rules as plugins:
     </div>
 {% endblock %}
 ```
+
+Heads-up for footer overrides: with 6.8 `layout/footer/footer.html.twig` switches to semantic markup (`<h2>`
+headlines, `<ul>` / `<li>` columns instead of `div[role]`), announced in 6.7.15.
