@@ -1,4 +1,4 @@
-# Security — Auth, CSRF, Validation, Authorization
+# Security: Auth, CSRF, Validation, Authorization
 
 ---
 
@@ -55,6 +55,8 @@ class MyAdminController extends AbstractController
 | `store-api` | `sw-access-key` header | `SalesChannelContext` | `StoreApiRouteScope::ID` |
 | `api` | OAuth2 Bearer token | `Context` | `ApiRouteScope::ID` |
 
+A scope also checks the path: `api` routes must live under `/api/`, `store-api` routes under `/store-api/`.
+
 ### Class level vs method level
 
 `_routeScope` is a Symfony route default, so the usual merge rules apply: a scope on the method
@@ -71,8 +73,8 @@ class MyController extends StorefrontController
     public function page(): Response {}                  // scope: storefront (inherited)
 
     #[Route(
-        path: '/my/api-hook',
-        name: 'api.my.hook',
+        path: '/api/_action/my/hook',                    // api scope requires the /api/ prefix
+        name: 'api.action.my.hook',
         defaults: ['_routeScope' => ['api']],            // overrides the class scope
         methods: ['POST']
     )]
@@ -83,9 +85,10 @@ class MyController extends StorefrontController
 A route may list several scopes: `['_routeScope' => ['storefront', 'store-api']]`. Do this only when the
 same action really serves both, and remember the resolved context type differs per request.
 
-**A route with no scope anywhere is not merely unscoped, it is broken.** `RouteScopeListener` throws
-`RoutingException::invalidRouteScope()` on the first request, so the failure shows up as a 500 rather
-than as a missing guard.
+**A route with no scope anywhere is broken.** `RouteScopeListener` throws
+`RoutingException::invalidRouteScope()` on the first request, so the failure shows up as a 412
+`FRAMEWORK__ROUTING_INVALID_ROUTE_SCOPE` rather than as a missing guard. A path outside the scope's prefix
+fails the same way.
 
 Core uses the constants instead of literals, and so should plugin code that needs to survive renames:
 
@@ -100,8 +103,9 @@ Related defaults, all settable at either level with the same override semantics:
 
 | Default | Effect |
 |---|---|
-| `_loginRequired` | Storefront/Store API: customer must be logged in |
+| `_loginRequired` | Storefront/Store API: customer must be logged in, otherwise 403 `FRAMEWORK__ROUTING_CUSTOMER_NOT_LOGGED_IN` |
 | `_loginRequiredAllowGuest` | Also accepts guest sessions |
+| `_contextTokenRequired` | Store API: reject requests without `sw-context-token` instead of starting a new context |
 | `_acl` | Admin API: array of required ACL privileges |
 | `_noStore` | Response is excluded from the HTTP cache |
 | `_httpCache` | Response is cacheable |
@@ -109,7 +113,7 @@ Related defaults, all settable at either level with the same override semantics:
 
 ---
 
-## Authorization — Filter by Authenticated Customer
+## Authorization: Filter by Authenticated Customer
 
 In Store API routes, always scope data to the logged-in customer. Never return data for other customers.
 
@@ -122,7 +126,7 @@ public function getMyOrders(SalesChannelContext $context): JsonResponse
 {
     $customer = $context->getCustomer();
     if ($customer === null) {
-        throw new \Shopware\Core\Checkout\Cart\Exception\CustomerNotLoggedInException();
+        throw \Shopware\Core\Checkout\Customer\CustomerException::customerNotLoggedIn(); // 403
     }
 
     $criteria = new Criteria();
@@ -130,7 +134,7 @@ public function getMyOrders(SalesChannelContext $context): JsonResponse
 
     $orders = $this->orderRepository->search($criteria, $context->getContext());
 
-    return new JsonResponse($orders->getElements());
+    return new JsonResponse($orders->getEntities()->getElements());
 }
 ```
 
@@ -138,7 +142,8 @@ public function getMyOrders(SalesChannelContext $context): JsonResponse
 
 ## Input Validation
 
-Validate all user input at the boundary (controllers). Use Symfony's Validator component.
+Validate all user input at the boundary (controllers). Use Symfony's Validator component. Constraints take
+named arguments (Symfony 7.3+ deprecates option arrays, and Shopware 6.8 removes them from its own constraints).
 
 ```php
 use Symfony\Component\Validator\Constraints as Assert;
@@ -150,18 +155,18 @@ class MyController extends StorefrontController
         private readonly ValidatorInterface $validator,
     ) {}
 
-    #[Route(path: '/my-form', methods: ['POST'])]
+    #[Route(path: '/my-form', name: 'frontend.my-plugin.submit', methods: ['POST'])]
     public function submitForm(Request $request, SalesChannelContext $context): Response
     {
-        $email = $request->request->get('email', '');
-        $name  = $request->request->get('name', '');
+        $email = $request->request->getString('email');
+        $name  = $request->request->getString('name');
 
         $violations = $this->validator->validate([
             'email' => $email,
             'name'  => $name,
-        ], new Assert\Collection([
+        ], new Assert\Collection(fields: [
             'email' => [new Assert\NotBlank(), new Assert\Email()],
-            'name'  => [new Assert\NotBlank(), new Assert\Length(['min' => 2, 'max' => 100])],
+            'name'  => [new Assert\NotBlank(), new Assert\Length(min: 2, max: 100)],
         ]));
 
         if ($violations->count() > 0) {
@@ -174,59 +179,34 @@ class MyController extends StorefrontController
 }
 ```
 
-For Store/Admin API — return structured errors:
+Read input from the bag you expect (`$request->request`, `$request->query`): `Request::get()` is deprecated in
+Symfony 7.4. For routes that accept both GET and POST, use `Shopware\Core\Framework\Adapter\Request\RequestParamHelper::get($request, 'name')`.
 
-```php
-if (!filter_var($request->get('email'), FILTER_VALIDATE_EMAIL)) {
-    throw new \Shopware\Core\Framework\Validation\Exception\ConstraintViolationException(
-        $this->buildViolations(['email' => 'Invalid email address']),
-        $request->request->all()
-    );
-}
-```
+For Store/Admin API, return structured errors with `DataValidator` (see "Validation Exception" below): it throws
+`ConstraintViolationException`, rendered as 400 `FRAMEWORK__CONSTRAINT_VIOLATION` with one error per violation.
 
 ---
 
 ## CSRF Protection (Storefront Forms)
 
-Shopware provides CSRF protection automatically for Storefront POST routes. Use the Twig helper in forms:
+Shopware has no CSRF tokens since 6.5: the `sw_csrf` Twig function, the `frontend.csrf.generateToken` route and
+`window.csrf` were removed. Protection comes from the session cookie being `SameSite=Lax`
+(`framework.session.cookie_samesite: lax`), so browsers do not send it with cross-site POST, PATCH or DELETE
+requests.
+
+What this means for extension code:
+
+- Never change state in a GET route: Lax cookies are still sent on top-level cross-site GET navigation.
+- Forms and same-origin `fetch()` calls need no token. Remove `{{ sw_csrf(...) }}` and hidden `_csrf_token`
+  fields when porting templates from 6.4.
+- Endpoints called without the session cookie (webhook receivers, server-to-server calls) are not covered:
+  authenticate them yourself (HMAC signature, API token).
 
 ```twig
-{# In Storefront Twig form #}
 <form action="{{ path('frontend.my-plugin.submit') }}" method="post">
-    {{ sw_csrf('frontend.my-plugin.submit') }}
-
-    <input type="text" name="email">
+    <input type="email" name="email">
     <button type="submit">Submit</button>
 </form>
-```
-
-For AJAX POST requests from JavaScript, fetch the CSRF token first:
-
-```js
-const response = await fetch('/csrf/generate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ intent: 'frontend.my-plugin.submit' }),
-});
-const { token } = await response.json();
-
-const formData = new FormData();
-formData.append('_csrf_token', token);
-formData.append('email', 'user@example.com');
-
-await fetch('/my-form', { method: 'POST', body: formData });
-```
-
-To exempt a route from CSRF (e.g., webhook receiver):
-
-```php
-#[Route(
-    path: '/webhook/shopware',
-    name: 'api.action.my_plugin.webhook',
-    defaults: ['csrf_protected' => false],
-    methods: ['POST']
-)]
 ```
 
 ---
@@ -237,11 +217,11 @@ Never write raw SQL in business logic. Use DAL for all queries.
 
 ```php
 // SQL injection vulnerability:
-$name = $request->get('name');
+$name = $request->request->getString('name');
 $connection->executeQuery("SELECT * FROM product WHERE name = '$name'");
 
 $criteria = new Criteria();
-$criteria->addFilter(new EqualsFilter('name', $request->get('name')));
+$criteria->addFilter(new EqualsFilter('name', $request->request->getString('name')));
 $this->productRepository->search($criteria, $context);
 
 $connection->executeStatement(
@@ -257,7 +237,7 @@ In migrations: always use named parameters or `?` placeholders, never string con
 ## Sensitive Data
 
 ```php
-// Logs customer PII — avoid:
+// Logs customer PII, avoid:
 $this->logger->info('Customer logged in', ['customer' => $customer]);
 
 $this->logger->info('Customer logged in', ['customerId' => $customer->getId()]);
@@ -265,11 +245,19 @@ $this->logger->info('Customer logged in', ['customerId' => $customer->getId()]);
 // Stores plain-text credentials in DB:
 $config->set('my_plugin.api_key', $plainKey);
 
-// inject via environment variables instead
-$apiKey = $_ENV['MY_PLUGIN_API_KEY'];
+// inject via environment variables instead (services.php)
+$services->set(MyApiClient::class)->args(['%env(MY_PLUGIN_API_KEY)%']);
 ```
 
 Do not log: passwords, full credit card numbers, session tokens, customer email+name combinations.
+
+Flow event values that must not leave the shop (tokens, opt-in links) are kept out of app webhook payloads with
+`EventDataCollection::HIDDEN_FROM_WEBHOOK` or `#[NotHookable]` (SW 6.7.14.1+, see references/integrations.md).
+
+Since 6.7.14 the storefront can send `Clear-Site-Data` on customer logout
+(`storefront.security.clear_site_data_on_logout: ['storage']`, allowed `cache`, `cookies`, `storage`; off by
+default). The header is origin-wide: `cookies` also ends an Administration session on the same domain. A custom
+storefront logout action opts in with `$request->attributes->set(PlatformRequest::ATTRIBUTE_CLEAR_SITE_DATA, true)`.
 
 ---
 
@@ -291,6 +279,7 @@ public function myEndpoint(Request $request, Context $context): JsonResponse
         $userId        = $source->getUserId();
         $isAdmin       = $source->isAdmin();
         $userIntegration = $source->getIntegrationId();
+        $mayUpdate     = $source->isAllowed('product:update');
     }
 
     if ($source instanceof SalesChannelApiSource) {
@@ -299,7 +288,7 @@ public function myEndpoint(Request $request, Context $context): JsonResponse
     }
 
     if ($source instanceof SystemSource) {
-        // Internal system call — highest trust level
+        // Internal system call, highest trust level
     }
 }
 ```
@@ -308,33 +297,32 @@ public function myEndpoint(Request $request, Context $context): JsonResponse
 
 ## Rate Limiting (Custom Routes)
 
+Use Shopware's `RateLimiter` service with your own limiter name:
+
 ```php
-use Symfony\Component\HttpFoundation\RateLimiter\RequestRateLimiterInterface;
+use Shopware\Core\Framework\RateLimiter\RateLimiter;
 
 class MyApiController extends AbstractController
 {
     public function __construct(
-        private readonly RequestRateLimiterInterface $rateLimiter,
+        private readonly RateLimiter $rateLimiter,
     ) {}
 
-    #[Route(path: '/api/_action/my-plugin/expensive', methods: ['POST'])]
+    #[Route(path: '/api/_action/my-plugin/expensive', name: 'api.action.my_plugin.expensive', methods: ['POST'])]
     public function expensive(Request $request): JsonResponse
     {
-        $limiter = $this->rateLimiter->create($request);
-        $limit   = $limiter->consume();
-
-        if (!$limit->isAccepted()) {
-            return new JsonResponse(
-                ['error' => 'Rate limit exceeded'],
-                429,
-                ['Retry-After' => $limit->getRetryAfter()->getTimestamp()]
-            );
-        }
+        // Throws RateLimitExceededException: 429 with the wait time in the error detail
+        $this->rateLimiter->ensureAccepted('my_plugin_expensive', (string) $request->getClientIp());
 
         // Expensive operation...
+        // For login-style limits call $this->rateLimiter->reset('my_plugin_expensive', $key) on success
     }
 }
 ```
+
+The limiter name must exist in the `shopware.api.rate_limiter` parameter, otherwise `ensureAccepted()` throws.
+A plugin ships `src/Resources/config/rate_limiter.yaml` and merges it in with a compiler pass; config, pass and
+policies are in references/advanced.md (Rate Limiter).
 
 ---
 
@@ -342,56 +330,57 @@ class MyApiController extends AbstractController
 
 ### Custom Exception Classes
 
+Shopware's convention is one domain exception per domain: a class extending `Shopware\Core\Framework\HttpException`
+with static factories that carry the status code, a unique error code and the message.
+
 ```php
 <?php declare(strict_types=1);
 
-namespace VendorName\PluginName\Exception;
+namespace VendorName\PluginName;
 
-use Shopware\Core\Framework\ShopwareHttpException;
+use Shopware\Core\Framework\HttpException;
 use Symfony\Component\HttpFoundation\Response;
 
-class ProductSyncFailedException extends ShopwareHttpException
+class MyPluginException extends HttpException
 {
-    public function __construct(string $productId, string $reason)
+    public const PRODUCT_SYNC_FAILED = 'MY_PLUGIN__PRODUCT_SYNC_FAILED';
+
+    public static function productSyncFailed(string $productId, string $reason, ?\Throwable $previous = null): self
     {
-        parent::__construct(
+        return new self(
+            Response::HTTP_BAD_GATEWAY, // 502
+            self::PRODUCT_SYNC_FAILED,
             'Failed to sync product "{{ productId }}": {{ reason }}',
-            ['productId' => $productId, 'reason' => $reason]
+            ['productId' => $productId, 'reason' => $reason],
+            $previous
         );
-    }
-
-    public function getStatusCode(): int
-    {
-        return Response::HTTP_BAD_GATEWAY; // 502
-    }
-
-    public function getErrorCode(): string
-    {
-        return 'MY_PLUGIN__PRODUCT_SYNC_FAILED';
     }
 }
 ```
 
-Extending `ShopwareHttpException` ensures:
+`HttpException` extends `ShopwareHttpException`, which ensures:
 - The exception is serialized to Shopware's standard JSON error format automatically
 - HTTP status code is set correctly
-- Error code is machine-readable for clients
+- Error code is machine-readable for clients (`$e->is(MyPluginException::PRODUCT_SYNC_FAILED)`)
+
+Add a subclass (`class ProductSyncFailedException extends MyPluginException`) returned by the factory only for
+cases callers must catch specifically.
 
 ### Throw and Catch
 
 ```php
 // Throw
-throw new ProductSyncFailedException($productId, $e->getMessage());
+throw MyPluginException::productSyncFailed($productId, $e->getMessage());
 
-// Catch in controller — let Shopware's exception listener handle it
+// Catch in controller: let Shopware's exception listener handle it
 // (it will serialize ShopwareHttpException to JSON automatically)
 
-// For non-ShopwareHttpException — wrap it
+// For other exceptions: wrap them
 try {
     $this->externalApi->sync($productId);
 } catch (\Throwable $e) {
     $this->logger->error('Sync failed', ['productId' => $productId, 'error' => $e->getMessage()]);
-    throw new ProductSyncFailedException($productId, $e->getMessage());
+    throw MyPluginException::productSyncFailed($productId, $e->getMessage(), $e);
 }
 ```
 
@@ -425,10 +414,10 @@ For Store API routes, use these standard HTTP codes:
 | Situation | Code | Exception |
 |---|---|---|
 | Missing required field | 400 | `\Shopware\Core\Framework\Validation\Exception\ConstraintViolationException` |
-| Not authenticated | 401 | `\Shopware\Core\Checkout\Cart\Exception\CustomerNotLoggedInException` |
-| Access denied | 403 | `\Shopware\Core\Framework\ShopwareHttpException` with 403 |
+| Not logged in | 403 | `\Shopware\Core\Checkout\Customer\CustomerException::customerNotLoggedIn()` (`_loginRequired` answers the same status before your code runs) |
+| Access denied | 403 | Your domain exception with `Response::HTTP_FORBIDDEN` |
 | Entity not found | 404 | `\Shopware\Core\Framework\DataAbstractionLayer\Exception\EntityNotFoundException` |
-| External service down | 502 | Custom exception extending `ShopwareHttpException` |
+| External service down | 502 | Your domain exception with `Response::HTTP_BAD_GATEWAY` |
 
 ### Validation Exception (Store API)
 
@@ -446,7 +435,7 @@ class MyStoreApiController
     public function createItem(RequestDataBag $data, SalesChannelContext $context): JsonResponse
     {
         $definition = new DataValidationDefinition('my_plugin.create_item');
-        $definition->add('name',  new Assert\NotBlank(), new Assert\Length(['min' => 2, 'max' => 100]));
+        $definition->add('name',  new Assert\NotBlank(), new Assert\Length(min: 2, max: 100));
         $definition->add('email', new Assert\NotBlank(), new Assert\Email());
 
         $this->validator->validate($data->all(), $definition);
@@ -463,11 +452,11 @@ class MyStoreApiController
 
 Before shipping a Shopware extension:
 
-- [ ] All routes have `_routeScope` defined
+- [ ] All routes have `_routeScope` defined, with paths matching the scope prefix
 - [ ] Store API routes filter by `$context->getCustomer()->getId()`
 - [ ] No raw SQL with string concatenation
-- [ ] No sensitive data in logs
-- [ ] All POST Storefront forms include `{{ sw_csrf(...) }}`
+- [ ] No sensitive data in logs or webhook payloads
+- [ ] No state changes in GET routes (SameSite cookies are the CSRF protection)
 - [ ] Webhook receivers verify HMAC signature
 - [ ] API keys stored as environment variables, not in DB plain-text
 - [ ] `_loginRequired` set on routes that need authenticated customers
