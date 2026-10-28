@@ -1,4 +1,4 @@
-# Admin — Vue.js Extension System
+# Admin: Vue.js Extension System
 
 Shopware Admin is a Vue 3 single-page application. Plugins extend it by registering components, modules, and overrides through the global `Shopware` object.
 
@@ -6,17 +6,18 @@ Shopware Admin is a Vue 3 single-page application. Plugins extend it by register
 
 ## Entry Point
 
-Create `src/Resources/app/administration/main.js`:
+Create `src/Resources/app/administration/src/main.js` (or `main.ts`):
 
 ```js
-import './src/module/my-module';
+import './module/my-module';
 ```
 
-The build picks this up automatically via `build-administration.sh`.
+The file is picked up when the plugin is active: `bin/console bundle:dump` lists it in `var/plugins.json`, and
+`bin/build-administration.sh` builds every entry found there.
 
 > **SW 6.7 breaking change.** The Administration build moved from Webpack to **Vite**. A plugin that ships
-> a `webpack.config.js` must migrate it to `vite.config.mts`. Because the build output differs, an admin
-> extension usually needs a separate plugin release for 6.7 and for 6.6.
+> a `build/webpack.config.js` must replace it with `src/Resources/app/administration/src/vite.config.mts`.
+> Because the build output differs, an admin extension usually needs a separate plugin release for 6.7 and for 6.6.
 
 ---
 
@@ -33,7 +34,7 @@ Shopware.Module.register('my-module', {
     title: 'my-module.general.label',
     description: 'my-module.general.description',
     color: '#ff3d00',
-    icon: 'default-shopping-paper-bag',
+    icon: 'regular-shopping-bag',
 
     snippets: {
         'de-DE': deDE,
@@ -58,12 +59,16 @@ Shopware.Module.register('my-module', {
         label: 'my-module.general.label',
         color: '#ff3d00',
         path: 'my.module.index',
-        icon: 'default-shopping-paper-bag',
+        icon: 'regular-shopping-bag',
         position: 100,
         parent: 'sw-catalogue',
     }],
 });
 ```
+
+Icons come from the Meteor icon kit (`regular-*` / `solid-*`); the old `default-*` names no longer exist.
+The server also loads any `en.json` / `de.json` (country-agnostic, recommended since 6.7.3) or `en-GB.json`
+file below `Resources/app/administration/src`, so the `snippets` import is optional.
 
 ---
 
@@ -93,7 +98,7 @@ Component.register('my-module-index', {
         },
         columns() {
             return [
-                { property: 'name', label: this.$tc('my-module.list.columnName') },
+                { property: 'name', label: this.$t('my-module.list.columnName') },
             ];
         },
     },
@@ -123,7 +128,7 @@ Template (`my-module-index.html.twig`):
 <sw-page class="my-module-index">
     {% block my_module_index_smart_bar_header %}
     <template #smart-bar-header>
-        <h2>{{ $tc('my-module.general.label') }}</h2>
+        <h2>{{ $t('my-module.general.label') }}</h2>
     </template>
     {% endblock %}
 
@@ -133,7 +138,7 @@ Template (`my-module-index.html.twig`):
             :repository="myEntityRepository"
             :columns="columns"
             :is-loading="isLoading"
-            :items="items"
+            :data-source="items"
         />
     </template>
     {% endblock %}
@@ -141,11 +146,14 @@ Template (`my-module-index.html.twig`):
 {% endblock %}
 ```
 
+`sw-entity-listing` takes the result as `:data-source`. `:items` still works in 6.7 but logs a deprecation and is
+removed in 6.8.
+
 ---
 
 ## Overriding Existing Components
 
-Use `Component.override()` to extend existing components — never replace them wholesale:
+Use `Component.override()` to extend existing components; never replace them wholesale:
 
 ```js
 const { Component } = Shopware;
@@ -165,6 +173,15 @@ Component.override('sw-product-detail', {
 
 Use `this.$super('methodName')` to invoke the original implementation.
 
+### Vue SFCs (SW 6.7.14+, experimental until 6.8)
+
+Admin components can also be authored as `.vue` files. Every `.vue` file needs `<script setup>`: a base
+component (`my-component.vue`) declares its extension surface with `swDefinePublic({ ... })`, and
+`my-component.override.vue` overrides it with `useSwPreviousState()` plus `swDefineOverride({ ... })`. An SFC
+override only works on a native-setup base; core components are still Options API in 6.7.15, so keep
+`Component.override()` for them. `Component.createExtendableSetup()` and `overrideComponentSetup()` are
+`@private` now; let the build transform emit them.
+
 ---
 
 ## Extending Existing Admin Blocks (Twig Slots)
@@ -178,13 +195,18 @@ Shopware.Component.override('sw-product-detail-base', { template });
 ```
 
 ```twig
-{# extension.html.twig — only override the blocks you need #}
-{% block sw_product_detail_base_content_form %}
-    {{ parent() }}
+{# extension.html.twig: only override the blocks you need #}
+{% block sw_product_detail_base_basic_info_card %}
+    {% parent %}
 
     <my-custom-component :product-id="product.id" />
 {% endblock %}
 ```
+
+> **SW 6.7.15 shell rework.** `sw-page` gained a `sw_page_top_bar` block (`sw_page_top_bar_actions` is no longer
+> inside `sw_page_search_bar`), the root of `sw_page_smart_bar` is now a `<div class="sw-page__smart-bar">`, the
+> `.smart-bar__back-btn` styles are gone, and several `sw-admin-menu` blocks were removed. `sw-page` is now a CSS
+> container, so `position: fixed` content inside it is positioned relative to the page.
 
 ---
 
@@ -217,6 +239,10 @@ methods: {
 },
 ```
 
+**SW 6.7.14+:** shared lookups can be cached per read by passing `{ cacheKey: ['my-plugin', 'currencies'], ttl }`
+as the third argument of `search()`; `forceReload: true` bypasses it, and
+`Shopware.Service('cacheService').invalidateCaches({ cacheKey: ['my-plugin'] })` drops a key prefix.
+
 ---
 
 ## Snippets (i18n)
@@ -229,7 +255,9 @@ methods: {
             "description": "Manage my entities"
         },
         "list": {
-            "columnName": "Name"
+            "columnName": "Name",
+            "active": "Active",
+            "inactive": "Inactive"
         }
     }
 }
@@ -238,17 +266,21 @@ methods: {
 Use in templates:
 
 ```twig
-{{ $tc('my-module.general.label') }}
 {{ $t('my-module.general.label') }}
 ```
+
+`$tc` still exists in 6.7 but only delegates to `$t` and is removed in 6.8.
 
 ---
 
 ## Common Admin Components
 
-SW 6.7 replaced the basic `sw-*` components with the **Meteor Component Library** (`mt-*`). The old
-components are removed, not deprecated. Shopware-specific components that have no Meteor equivalent
-(`sw-page`, `sw-entity-listing`, `sw-data-grid`, `sw-entity-multi-select`) keep their names.
+SW 6.7 switched the basic `sw-*` components to the **Meteor Component Library** (`mt-*`). The old names still
+resolve in 6.7, but only as deprecated wrappers: most render the `mt-*` component (pass `deprecated` to get the
+old one), while `sw-popover` and `sw-tabs` keep their legacy rendering unless you opt in (`use-meteor-component`
+on `sw-tabs`). They are removed in 6.8 (`sw-tabs` in 6.9), so use `mt-*` directly. Shopware-specific components
+that have no Meteor equivalent (`sw-page`, `sw-entity-listing`, `sw-data-grid`, `sw-entity-multi-select`) keep
+their names.
 
 | Component | Purpose |
 |---|---|
@@ -264,17 +296,20 @@ components are removed, not deprecated. Shopware-specific components that have n
 | `<mt-checkbox>` / `<mt-datepicker>` / `<mt-colorpicker>` | Typed inputs |
 | `<mt-loader>` | Loading spinner |
 | `<mt-banner>` | Alert / notification box |
+| `<mt-empty-state>` | Empty state (`headline`, `description`, `icon`) |
 | `<mt-tabs>` | Tab navigation |
 | `<mt-icon>` | Icon |
 | `<mt-tooltip>` | Tooltip (plain strings and HTML only, no Vue components inside) |
 
+Snackbars (SW 6.7.14+): `Shopware.Service('snackbarService').addSnackbar({ ... })` and `removeSnackbar(id)`.
+
 ### sw-* to mt-* migration map
 
-| Removed in 6.7 | Replacement |
+| Deprecated in 6.7, removed in 6.8 | Replacement |
 |---|---|
 | `sw-button` | `mt-button` |
 | `sw-card` | `mt-card` |
-| `sw-icon` | `mt-icon` |
+| `sw-icon` | `mt-icon` (no `small` / `large` props, use `size`) |
 | `sw-text-field` | `mt-text-field` |
 | `sw-textarea-field` | `mt-textarea` |
 | `sw-number-field` | `mt-number-field` |
@@ -288,11 +323,14 @@ components are removed, not deprecated. Shopware-specific components that have n
 | `sw-colorpicker` | `mt-colorpicker` |
 | `sw-progress-bar` | `mt-progress-bar` |
 | `sw-loader` | `mt-loader` |
-| `sw-tabs` | `mt-tabs` (`isVertical` renamed to `vertical`, `alignRight` removed) |
+| `sw-tabs` (removed in 6.9) | `mt-tabs` (`isVertical` renamed to `vertical`, `alignRight` removed, `items` prop instead of `sw-tabs-item` children) |
 | `sw-popover` | `mt-floating-ui` (no `zIndex`, `resizeWidth`, `popoverClass`; not open by default) |
-| `sw-external-link` | `mt-external-link` (no `icon` prop) |
 | `sw-skeleton-bar` | `mt-skeleton-bar` |
 | `sw-alert` | `mt-banner` |
+| `sw-empty-state` | `mt-empty-state` (`title` / `subline` become `headline` / `description`, `icon` is required) |
+
+`sw-external-link` is not part of this list: it still exists in 6.7, and Meteor's closest match is
+`<mt-link type="external">`.
 
 **Prop and event renames that apply across all `mt-*` fields:**
 
@@ -308,7 +346,8 @@ components are removed, not deprecated. Shopware-specific components that have n
 | `id`, `ghostValue`, `padded` props | removed |
 
 `mt-button` also lost the `ghost`, `danger`, `ghost-danger`, `contrast` and `context` variants and the
-`router-link` prop. Use `variant` plus a `@click` handler with `this.$router.push()` instead.
+`router-link` prop. Valid variants are `primary`, `secondary`, `tertiary`, `critical` and `action`; navigate with a
+`@click` handler that calls `this.$router.push()`.
 
 ---
 
@@ -347,10 +386,13 @@ import { location } from '@shopware-ag/meteor-admin-sdk';
 location.startAutoResizer();
 
 import { data } from '@shopware-ag/meteor-admin-sdk';
-const subscriptionToken = data.subscribe('product', (product) => {
+const subscriptionToken = data.subscribe('sw-product-detail__product', ({ data: product }) => {
     console.log(product);
-});
+}, { selectors: ['id', 'name'] });
 ```
+
+The first argument is a dataset id that the Admin publishes (`Shopware.ExtensionAPI.publishData`), not an entity
+name. App (iframe) extensions must request the fields they need via `selectors`.
 
 ---
 
@@ -359,6 +401,8 @@ const subscriptionToken = data.subscribe('product', (product) => {
 Define privilege keys in JS so your module appears in the Admin role editor. Use in component:
 
 ```js
+inject: ['acl'],
+
 computed: {
     canEdit() {
         return this.acl.can('my_module.editor');
@@ -371,15 +415,21 @@ computed: {
 ## Building Admin Assets
 
 ```bash
-# Full rebuild
+# Full rebuild (project root)
 bin/build-administration.sh
 
-# Development watch mode (from Shopware root)
-cd vendor/shopware/platform
-./bin/build-administration.sh --watch
+# Vite dev server with hot reload
+bin/watch-administration.sh
 ```
 
-Plugins must have `"shopware-administration-mode": "plugin"` or equivalent in their `package.json` to be picked up by the build process.
+A plugin needs no extra flag in its `package.json`: it is built once it is active and has
+`src/Resources/app/administration/src/main.js` (or `main.ts`). If `src/Resources/app/administration/package.json`
+exists and has no `node_modules` yet, the watch script installs its dependencies first.
+
+**SW 6.7.14+ (experimental):** `composer admin:setup-extension-tooling` (Composer installs:
+`bin/console administration:setup-extension-tooling`) generates TypeScript and ESLint configs against the installed
+Shopware version, and `composer admin:check-extensions` runs `vue-tsc` and ESLint per extension; `-- --fix` applies
+the `sw-*` to `mt-*` codemods.
 
 ---
 
@@ -392,7 +442,7 @@ Shopware Admin uses three different naming formats depending on context:
 | Module ID | kebab-case | `my-plugin-webhook` |
 | Component name | kebab-case | `my-plugin-webhook-list` |
 | Route name | dot-notation | `my.plugin.webhook.index` |
-| Route path | kebab-case | `my-plugin/webhook/index` |
+| Route path | module ID split on `-` into segments | `/my/plugin/webhook/index` |
 | ACL key | snake_case | `my_plugin_webhook` |
 | Snippet key | dot-notation | `my-plugin.webhook.title` |
 
@@ -400,8 +450,8 @@ Shopware Admin uses three different naming formats depending on context:
 Shopware.Module.register('my-plugin-webhook', {   // kebab-case
     routes: {
         index: {
-            path: 'index',                          // kebab segments
-            name: 'my.plugin.webhook.index',        // dot-notation — NOT used here, auto-generated
+            path: 'index',                          // becomes /my/plugin/webhook/index
+            name: 'my.plugin.webhook.index',        // dot-notation, NOT used here: always auto-generated
             component: 'my-plugin-webhook-list',    // kebab-case component
         },
     },
@@ -413,11 +463,12 @@ Shopware.Module.register('my-plugin-webhook', {   // kebab-case
 
 ---
 
-## ACL Privileges — Registration
+## ACL Privileges: Registration
 
 Define privilege keys so your module appears in the Admin role editor.
 
-Create `src/Resources/app/administration/src/module/my-module/acl/index.js`:
+Create `src/Resources/app/administration/src/module/my-module/acl/index.js` and import it from the module's
+`index.js` (`import './acl';`):
 
 ```js
 Shopware.Service('privileges').addPrivilegeMappingEntry({
@@ -448,6 +499,8 @@ Shopware.Service('privileges').addPrivilegeMappingEntry({
 Use in components:
 
 ```js
+inject: ['acl'],
+
 computed: {
     canView()   { return this.acl.can('my_plugin_webhook.viewer'); },
     canEdit()   { return this.acl.can('my_plugin_webhook.editor'); },
@@ -458,7 +511,7 @@ computed: {
 
 ---
 
-## List Page — Filter, Inline Edit, Delete Workflow
+## List Page: Filter, Inline Edit, Delete Workflow
 
 ### Critical sw-entity-listing Props
 
@@ -468,7 +521,7 @@ computed: {
 <sw-entity-listing
     :repository="myEntityRepository"
     :columns="columns"
-    :items="items"
+    :data-source="items"
     :is-loading="isLoading"
     :full-page="false"
     :show-selection="false"
@@ -480,15 +533,15 @@ computed: {
 >
     <template #column-status="{ item }">
         <sw-label :variant="item.active ? 'success' : 'danger'">
-            {{ item.active ? $tc('global.default.active') : $tc('global.default.inactive') }}
+            {{ item.active ? $t('my-module.list.active') : $t('my-module.list.inactive') }}
         </sw-label>
     </template>
 </sw-entity-listing>
 {% endblock %}
 ```
 
-`:full-page="false"` — prevents absolute positioning that hides the grid inside cards.
-`:disable-data-fetching="true"` — lets your component control when data loads.
+`:full-page="false"` prevents absolute positioning that hides the grid inside cards.
+`:disable-data-fetching="true"` lets your component control when data loads.
 
 ### Column Definition with Inline Edit
 
@@ -498,20 +551,20 @@ computed: {
         return [
             {
                 property:   'name',
-                label:      this.$tc('my-module.list.columnName'),
+                label:      this.$t('my-module.list.columnName'),
                 inlineEdit: 'string',   // 'string' | 'number' | 'boolean'
                 sortable:   true,
                 primary:    true,
             },
             {
                 property:   'priority',
-                label:      this.$tc('my-module.list.columnPriority'),
+                label:      this.$t('my-module.list.columnPriority'),
                 inlineEdit: 'number',
                 sortable:   true,
             },
             {
                 property:   'active',
-                label:      this.$tc('global.default.active'),
+                label:      this.$t('my-module.list.active'),
                 inlineEdit: 'boolean',
             },
         ];
@@ -552,10 +605,11 @@ methods: {
 
 ## Admin Search Configuration
 
-Register your entity in the Admin global search bar:
+Register your entity in the Admin global search bar. The configuration is keyed by the module's `entity`:
 
 ```js
 Shopware.Module.register('my-plugin-webhook', {
+    entity: 'my_plugin_webhook',
     defaultSearchConfiguration: {
         _searchable: true,
         name: {
@@ -566,12 +620,13 @@ Shopware.Module.register('my-plugin-webhook', {
 });
 ```
 
-Or configure globally:
+Or use the ranking constants:
 
 ```js
 import { searchRankingPoint } from 'src/app/service/search-ranking.service';
 
 Shopware.Module.register('my-plugin-webhook', {
+    entity: 'my_plugin_webhook',
     defaultSearchConfiguration: {
         _searchable: true,
         name: {
@@ -586,9 +641,11 @@ Shopware.Module.register('my-plugin-webhook', {
 
 ## State Management
 
-**SW 6.7:** Pinia is the only option. The Vue 2 compatibility layer and the Vuex-based `Shopware.State` API were removed. On 6.6 `Shopware.State` still works but is deprecated.
+**SW 6.7:** every core store is Pinia (`Shopware.Store`), so `Shopware.State.get('swProductDetail')` and other core
+Vuex modules are gone. `Shopware.State` itself still exists for your own Vuex modules, but it is deprecated and
+removed together with Vuex in 6.8. The Vue 2 compatibility layer was removed.
 
-### Pinia (SW 6.6+, only option in 6.7)
+### Pinia (SW 6.6+, required for core stores in 6.7)
 
 ```js
 Shopware.Store.register({
@@ -607,7 +664,7 @@ methods: {
 },
 ```
 
-### Vuex (removed in 6.7, legacy 6.5/6.6 only)
+### Vuex (deprecated, removed in 6.8)
 
 ```js
 Shopware.State.registerModule('myModule', {
@@ -624,4 +681,4 @@ Shopware.State.registerModule('myModule', {
 
 When porting to 6.7, the Vuex helper functions were renamed as well: `mapState` became `mapVuexState`,
 and the equivalent Pinia helpers took over the original names. `vue-i18n` was upgraded to v10, which
-removed the standalone `tc` function; `$tc` still exists on components but delegates to `t`.
+removed the standalone `tc` function; `$tc` still exists on components but delegates to `t` and is removed in 6.8.
