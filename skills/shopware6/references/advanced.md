@@ -1,4 +1,4 @@
-# Advanced — PHP Attributes Entities, Flysystem, Redis, Rate Limiter, Data Indexer, Field Inheritance, In-App Purchases
+# Advanced: PHP Attributes Entities, Flysystem, Redis, Rate Limiter, Data Indexer, Field Inheritance, In-App Purchases
 
 ---
 
@@ -11,6 +11,7 @@ A modern alternative to `EntityDefinition` classes. Less boilerplate, same DAL f
 
 namespace VendorName\PluginName\Core\Content\MyEntity;
 
+use Shopware\Core\Content\Product\ProductEntity;
 use Shopware\Core\Framework\DataAbstractionLayer\Attribute\CustomFields;
 use Shopware\Core\Framework\DataAbstractionLayer\Attribute\Entity as EntityAttribute;
 use Shopware\Core\Framework\DataAbstractionLayer\Attribute\Field;
@@ -19,9 +20,11 @@ use Shopware\Core\Framework\DataAbstractionLayer\Attribute\ForeignKey;
 use Shopware\Core\Framework\DataAbstractionLayer\Attribute\ManyToOne;
 use Shopware\Core\Framework\DataAbstractionLayer\Attribute\OneToMany;
 use Shopware\Core\Framework\DataAbstractionLayer\Attribute\PrimaryKey;
+use Shopware\Core\Framework\DataAbstractionLayer\Attribute\ReferenceVersion;
 use Shopware\Core\Framework\DataAbstractionLayer\Attribute\Required;
 use Shopware\Core\Framework\DataAbstractionLayer\Attribute\Translations;
 use Shopware\Core\Framework\DataAbstractionLayer\Entity;
+use Shopware\Core\Framework\Struct\ArrayEntity;
 
 #[EntityAttribute('my_entity')]
 class MyEntity extends Entity
@@ -49,25 +52,36 @@ class MyEntity extends Entity
     #[Field(type: FieldType::JSON)]
     public ?array $config = null;
 
-    // Expose to Admin API only
-    #[Field(type: FieldType::STRING, api: true)]
+    // api: true exposes the field to Admin API and Store API; without `api` it is hidden from both.
+    // Admin API only:
+    #[Field(type: FieldType::STRING, api: ['admin-api' => true, 'store-api' => false])]
     public ?string $externalId = null;
 
-    // Translatable field — must be nullable
+    // Translated field, stored in the auto-generated `my_entity_translation` table
     #[Field(type: FieldType::STRING, translated: true)]
     public ?string $label = null;
 
+    /**
+     * @var array<string, ArrayEntity>|null
+     */
     #[Translations]
-    public ?MyEntityTranslationCollection $translations = null;
+    public ?array $translations = null;
 
     #[ForeignKey(entity: 'product')]
     public ?string $productId = null;
 
+    // `product` is versioned: the reference needs its version column too
+    #[ReferenceVersion(entity: 'product')]
+    public ?string $productVersionId = null;
+
     #[ManyToOne(entity: 'product', column: 'product_id')]
     public ?ProductEntity $product = null;
 
+    /**
+     * @var array<string, MyOtherEntity>|null
+     */
     #[OneToMany(entity: 'my_other_entity', ref: 'my_entity_id')]
-    public ?MyOtherEntityCollection $otherEntities = null;
+    public ?array $otherEntities = null;
 
     // Custom fields (JSON blob)
     #[CustomFields]
@@ -75,9 +89,15 @@ class MyEntity extends Entity
 }
 ```
 
-### Registration in services.php (not services.xml)
+A non-nullable property type adds the `Required` flag, so `$name`, `$active` and `$priority` above must be
+present on every create; `#[Required]` is only needed on nullable properties. The attribute classes are
+`final` since 6.7 (except the base `Field`).
+
+### Registration in services.php
 
 ```php
+<?php declare(strict_types=1);
+
 use Symfony\Component\DependencyInjection\Loader\Configurator\ContainerConfigurator;
 use VendorName\PluginName\Core\Content\MyEntity\MyEntity;
 
@@ -94,9 +114,8 @@ Shopware auto-registers `my_entity.definition` and `my_entity.repository`.
 ### Inject the auto-generated repository
 
 ```php
-<service id="VendorName\PluginName\Service\MyService">
-    <argument type="service" id="my_entity.repository"/>
-</service>
+$services->set(MyService::class)
+    ->args([service('my_entity.repository')]);
 ```
 
 ### Migration still required
@@ -115,10 +134,29 @@ public function update(Connection $connection): void
             `config`      JSON NULL,
             `external_id` VARCHAR(255) NULL,
             `product_id`  BINARY(16) NULL,
+            `product_version_id` BINARY(16) NULL,
             `custom_fields` JSON NULL,
             `created_at`  DATETIME(3) NOT NULL,
             `updated_at`  DATETIME(3) NULL,
-            PRIMARY KEY (`id`)
+            PRIMARY KEY (`id`),
+            CONSTRAINT `fk.my_entity.product_id` FOREIGN KEY (`product_id`, `product_version_id`)
+                REFERENCES `product` (`id`, `version_id`) ON DELETE SET NULL ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ');
+
+    // Translated fields (`label`) go into <entity>_translation
+    $connection->executeStatement('
+        CREATE TABLE IF NOT EXISTS `my_entity_translation` (
+            `my_entity_id` BINARY(16) NOT NULL,
+            `language_id`  BINARY(16) NOT NULL,
+            `label`        VARCHAR(255) NULL,
+            `created_at`   DATETIME(3) NOT NULL,
+            `updated_at`   DATETIME(3) NULL,
+            PRIMARY KEY (`my_entity_id`, `language_id`),
+            CONSTRAINT `fk.my_entity_translation.my_entity_id` FOREIGN KEY (`my_entity_id`)
+                REFERENCES `my_entity` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+            CONSTRAINT `fk.my_entity_translation.language_id` FOREIGN KEY (`language_id`)
+                REFERENCES `language` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ');
 }
@@ -126,7 +164,7 @@ public function update(Connection $connection): void
 
 ---
 
-## Flysystem — File Storage
+## Flysystem: File Storage
 
 Shopware exposes plugin-specific public and private filesystems via DI.
 
@@ -136,7 +174,7 @@ use League\Flysystem\FilesystemOperator;
 class MyFileService
 {
     public function __construct(
-        // Naming: snake_case_of_plugin_class + .filesystem.public / .filesystem.private
+        // Service IDs: <snake_case of the plugin class short name>.filesystem.public / .private
         private readonly FilesystemOperator $publicFilesystem,
         private readonly FilesystemOperator $privateFilesystem,
     ) {}
@@ -172,15 +210,19 @@ class MyFileService
 }
 ```
 
-Register in services.xml with the auto-generated filesystem service IDs:
+Register in services.php with the auto-generated filesystem service IDs (plugin class
+`VendorNamePluginName` becomes `vendor_name_plugin_name`; files land under `plugins/vendor_name_plugin_name/`):
 
-```xml
-<service id="VendorName\PluginName\Service\MyFileService">
-    <!-- Service ID pattern: snake_case_plugin_name.filesystem.public -->
-    <argument type="service" id="vendor_name_plugin_name.filesystem.public"/>
-    <argument type="service" id="vendor_name_plugin_name.filesystem.private"/>
-</service>
+```php
+$services->set(MyFileService::class)
+    ->args([
+        service('vendor_name_plugin_name.filesystem.public'),
+        service('vendor_name_plugin_name.filesystem.private'),
+    ]);
 ```
+
+With autowiring, the aliases `FilesystemOperator $vendorNamePluginNamePublicFilesystem` and
+`$vendorNamePluginNamePrivateFilesystem` resolve to the same services.
 
 ### Common Flysystem operations
 
@@ -212,7 +254,7 @@ foreach ($fs->listContents('/', true) as $item) {
 
 ## Redis Integration (SW 6.6.8+)
 
-Redis can be used for caching, sessions, and queues. It is optional — always handle its absence gracefully.
+Redis can be used for caching, sessions, and queues. It is optional, so always handle its absence gracefully.
 
 ### Configuration (environment)
 
@@ -246,7 +288,7 @@ class MyRedisService
     public function cacheData(string $key, mixed $value, int $ttl = 3600): void
     {
         if (!$this->redisProvider->hasConnection('my_plugin_cache')) {
-            // Redis not configured — skip or fall back to object cache
+            // Redis not configured: skip or fall back to object cache
             return;
         }
 
@@ -270,32 +312,26 @@ class MyRedisService
 
 Register:
 
-```xml
-<service id="VendorName\PluginName\Service\MyRedisService">
-    <argument type="service" id="Shopware\Core\Framework\Adapter\Redis\RedisConnectionProvider"/>
-</service>
+```php
+$services->set(MyRedisService::class)
+    ->args([service(RedisConnectionProvider::class)]);
 ```
 
 ### Redis for Message Queue transport
 
-```yaml
-# config/packages/messenger.yaml
-framework:
-    messenger:
-        transports:
-            async:
-                dsn: '%env(REDIS_URL)%/messages'
-                options:
-                    stream: shopware
-                    group: default
-                    consumer: '%hostname%'
+Shopware's `async` and `low_priority` transports read their DSN from env vars, so no YAML override is
+needed:
+
+```env
+MESSENGER_TRANSPORT_DSN=redis://localhost:6379/messages
+MESSENGER_TRANSPORT_LOW_PRIORITY_DSN=redis://localhost:6379/messages_low
 ```
 
 ---
 
 ## Rate Limiter (Custom API Routes)
 
-### Step 1 — Rate Limiter Config
+### Step 1: Rate Limiter Config
 
 ```yaml
 # src/Resources/config/rate_limiter.yaml
@@ -310,7 +346,7 @@ my_plugin_api:
           interval: '1 hour'
 ```
 
-### Step 2 — Register via Compiler Pass
+### Step 2: Register via Compiler Pass
 
 ```php
 <?php declare(strict_types=1);
@@ -349,7 +385,7 @@ public function build(ContainerBuilder $container): void
 }
 ```
 
-### Step 3 — Use in Route
+### Step 3: Use in Route
 
 ```php
 use Shopware\Core\Framework\RateLimiter\RateLimiter;
@@ -361,13 +397,18 @@ class MyStoreApiRoute
         private readonly RateLimiter $rateLimiter,
     ) {}
 
-    #[Route(path: '/store-api/my-route', methods: ['POST'])]
+    #[Route(
+        path: '/store-api/my-route',
+        name: 'store-api.my-plugin.my-route',
+        defaults: ['_routeScope' => ['store-api']],
+        methods: ['POST']
+    )]
     public function load(Request $request, SalesChannelContext $context): MyRouteResponse
     {
         // Throws RateLimitExceededException (429) if exceeded
         $this->rateLimiter->ensureAccepted('my_plugin_api', $request->getClientIp());
 
-        // Reset on success (optional — for login-style endpoints)
+        // Reset on success (optional, for login-style endpoints)
         $this->rateLimiter->reset('my_plugin_api', $request->getClientIp());
 
         return new MyRouteResponse();
@@ -382,7 +423,8 @@ class MyStoreApiRoute
 | `fixed_window` | Hard limit per time window |
 | `sliding_window` | Rolling window, smoother |
 | `token_bucket` | Burst allowed, refills over time |
-| `time_backoff` | Escalating delays on repeated failure |
+| `time_backoff` | Escalating delays on repeated failure (Shopware) |
+| `system_config` | Limits read from system config (Shopware) |
 
 ---
 
@@ -395,11 +437,14 @@ Index pre-computed data on entity write to avoid expensive calculations on every
 
 namespace VendorName\PluginName\Indexing;
 
+use Doctrine\DBAL\Connection;
 use Shopware\Core\Framework\DataAbstractionLayer\Dbal\Common\IteratorFactory;
 use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
 use Shopware\Core\Framework\DataAbstractionLayer\Event\EntityWrittenContainerEvent;
 use Shopware\Core\Framework\DataAbstractionLayer\Indexing\EntityIndexer;
 use Shopware\Core\Framework\DataAbstractionLayer\Indexing\EntityIndexingMessage;
+use Shopware\Core\Framework\Plugin\Exception\DecorationPatternException;
+use Shopware\Core\Framework\Uuid\Uuid;
 
 class MyEntityIndexer extends EntityIndexer
 {
@@ -414,7 +459,7 @@ class MyEntityIndexer extends EntityIndexer
         return 'my_plugin.my_entity.indexer';
     }
 
-    public function iterate(/*offset*/ $offset): ?EntityIndexingMessage
+    public function iterate(?array $offset): ?EntityIndexingMessage
     {
         $iterator = $this->iteratorFactory->createIterator(
             $this->myEntityRepository->getDefinition(),
@@ -423,7 +468,7 @@ class MyEntityIndexer extends EntityIndexer
 
         $ids = $iterator->fetch();
 
-        if (empty($ids)) {
+        if ($ids === []) {
             return null;
         }
 
@@ -434,11 +479,11 @@ class MyEntityIndexer extends EntityIndexer
     {
         $ids = $event->getPrimaryKeys('my_entity');
 
-        if (empty($ids)) {
+        if ($ids === []) {
             return null;
         }
 
-        return new EntityIndexingMessage(array_values($ids));
+        return new EntityIndexingMessage(array_values($ids), null, $event->getContext());
     }
 
     public function handle(EntityIndexingMessage $message): void
@@ -457,6 +502,16 @@ class MyEntityIndexer extends EntityIndexer
         }
     }
 
+    public function getTotal(): int
+    {
+        return $this->iteratorFactory->createIterator($this->myEntityRepository->getDefinition())->fetchCount();
+    }
+
+    public function getDecorated(): EntityIndexer
+    {
+        throw new DecorationPatternException(static::class);
+    }
+
     private function computeScore(string $id): float
     {
         // Expensive calculation done once per update
@@ -465,15 +520,18 @@ class MyEntityIndexer extends EntityIndexer
 }
 ```
 
+`getTotal()` and `getDecorated()` are abstract on `EntityIndexer`; a class without them is fatal.
+
 Register:
 
-```xml
-<service id="VendorName\PluginName\Indexing\MyEntityIndexer">
-    <argument type="service" id="Shopware\Core\Framework\DataAbstractionLayer\Dbal\Common\IteratorFactory"/>
-    <argument type="service" id="my_entity.repository"/>
-    <argument type="service" id="Doctrine\DBAL\Connection"/>
-    <tag name="shopware.entity_indexer"/>
-</service>
+```php
+$services->set(MyEntityIndexer::class)
+    ->args([
+        service(IteratorFactory::class),
+        service('my_entity.repository'),
+        service(Connection::class),
+    ])
+    ->tag('shopware.entity_indexer');
 ```
 
 Trigger full reindex:
@@ -510,7 +568,7 @@ class MyVariantDefinition extends EntityDefinition
             new ParentAssociationField(self::class, 'id'),
             new ChildrenAssociationField(self::class),
 
-            // Inherited fields — null in child = fall back to parent value
+            // Inherited fields: null in child = fall back to parent value
             (new StringField('name', 'name'))->addFlags(new Inherited(), new ApiAware()),
             (new FloatField('price', 'price'))->addFlags(new Inherited(), new ApiAware()),
             (new BoolField('active', 'active'))->addFlags(new Inherited(), new ApiAware()),
@@ -522,18 +580,20 @@ class MyVariantDefinition extends EntityDefinition
 }
 ```
 
-Fetch with inheritance resolved (pass parent context):
+Fetch with inheritance resolved. A plain `Context` has `considerInheritance() === false`; only the
+`SalesChannelContext` turns it on, so in Admin API, CLI or scheduled code enable it explicitly:
 
 ```php
 $criteria = new Criteria([$variantId]);
-// Inheritance is resolved automatically when using the standard repository
-$variant = $this->variantRepository->search($criteria, $context)->first();
+$variant = $context->enableInheritance(
+    fn (Context $context) => $this->variantRepository->search($criteria, $context)->getEntities()->first()
+);
 
 // name comes from parent if variant.name IS NULL
 $name = $variant->getName();
 ```
 
-Write only the child's own override — `null` means "inherit from parent":
+Write only the child's own override; `null` means "inherit from parent":
 
 ```php
 $this->variantRepository->update([
@@ -551,10 +611,10 @@ $this->variantRepository->update([
 
 Gate premium features behind a paid add-on within the same plugin.
 
-### PHP — Check if feature is purchased
+### PHP: Check if feature is purchased
 
 ```php
-use Shopware\Core\Framework\Plugin\InAppPurchase;
+use Shopware\Core\Framework\Store\InAppPurchase;
 
 class MyPremiumService
 {
@@ -571,15 +631,14 @@ class MyPremiumService
 }
 ```
 
-Inject in services.xml:
+Inject in services.php:
 
-```xml
-<service id="VendorName\PluginName\Service\MyPremiumService">
-    <argument type="service" id="Shopware\Core\Framework\Plugin\InAppPurchase"/>
-</service>
+```php
+$services->set(MyPremiumService::class)
+    ->args([service(InAppPurchase::class)]);
 ```
 
-### Admin Vue — Show purchase button
+### Admin Vue: Show purchase button
 
 ```js
 computed: {
@@ -590,8 +649,9 @@ computed: {
 
 methods: {
     requestPurchase() {
-        this.inAppPurchaseCheckout.request(
-            { identifier: 'advanced-feature' },
+        // opens the checkout modal; the extension name must match the plugin bundle name
+        Shopware.Store.get('inAppPurchaseCheckout').request(
+            { featureId: 'advanced-feature' },
             'VendorNamePluginName'
         );
     },
@@ -599,18 +659,16 @@ methods: {
 ```
 
 ```twig
-{# In admin component template #}
+{# In admin component template: Twig blocks for extensibility, Vue directives for logic #}
 {% block my_premium_section %}
-    {% if isPremiumActive %}
-        {# Show premium UI #}
-        <my-premium-component />
-    {% else %}
-        <mt-button @click="requestPurchase">
-            {{ $tc('my-plugin.iap.unlockAdvanced') }}
-        </mt-button>
-    {% endif %}
+    <my-premium-component v-if="isPremiumActive" />
+    <mt-button v-else @click="requestPurchase">
+        {{ $t('my-plugin.iap.unlockAdvanced') }}
+    </mt-button>
 {% endblock %}
 ```
+
+`$tc` is deprecated since 6.7 and removed in 6.8; use `$t`.
 
 ### IAP identifiers must be registered in the Shopware Account / Extension Store dashboard before they can be purchased.
 
@@ -628,42 +686,33 @@ Apps can intercept checkout to hide/show payment and shipping methods based on c
 </gateways>
 ```
 
-### App server handler (PHP SDK)
+### App server response
 
-```php
-use Shopware\App\SDK\Context\Checkout\CheckoutContext;
+The app server receives cart, sales channel context and the available methods, and answers within 5
+seconds with a JSON list of commands. Each entry is `{"command": <key>, "payload": {...}}`; methods are
+addressed by **technical name**, not by ID:
 
-class CheckoutGatewayHandler
-{
-    public function handle(CheckoutContext $context): array
+```json
+[
     {
-        $commands = [];
-        $cart     = $context->getCart();
-        $total    = $cart->getPrice()->getTotalPrice();
-
-        if ($total > 1000) {
-            $commands[] = [
-                'command'         => 'hidePaymentMethod',
-                'paymentMethodId' => 'some-payment-method-id',
-            ];
-        }
-
-        if ($total < 50) {
-            $commands[] = [
-                'command'          => 'addShippingMethod',
-                'shippingMethodId' => 'express-shipping-id',
-            ];
-        }
-
-        return $commands;
+        "command": "remove-payment-method",
+        "payload": { "paymentMethodTechnicalName": "payment_invoicepayment" }
+    },
+    {
+        "command": "add-shipping-method",
+        "payload": { "shippingMethodTechnicalName": "shipping_express" }
     }
-}
+]
 ```
+
+Command keys: `add-payment-method`, `remove-payment-method`, `add-shipping-method`,
+`remove-shipping-method`, `add-payment-method-extension`, `add-shipping-method-extension`,
+`add-cart-error`.
 
 Plugins can react after all app gateways respond:
 
 ```php
-use Shopware\Core\Checkout\Gateway\Event\CheckoutGatewayCommandsCollectedEvent;
+use Shopware\Core\Checkout\Gateway\Command\Event\CheckoutGatewayCommandsCollectedEvent;
 
 public static function getSubscribedEvents(): array
 {
@@ -672,5 +721,6 @@ public static function getSubscribedEvents(): array
 
 public function onGatewayCommands(CheckoutGatewayCommandsCollectedEvent $event): void
 {
-    $commands = $event->getCommands();
+    $commands = $event->getCommands(); // CheckoutGatewayCommandCollection, also getCart(), getSalesChannelContext()
 }
+```
