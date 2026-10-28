@@ -1,10 +1,19 @@
 ---
 name: shopware6
 description: >-
-  Shopware 6 development across plugins, apps and themes: DAL entities, migrations, custom fields and entity extensions, Storefront (Twig, SCSS, JS plugin system), Admin (Vue 3, Meteor Admin SDK), Admin API and Store API, cart processors, collectors and validators, payment and shipping handlers, rule builder conditions, CMS elements, App System manifests and webhooks, SEO URLs, mail templates, state machines, message queue, Elasticsearch, HTTP cache, PHPUnit and Jest testing, security and deployment. Use when the user asks to create a Shopware plugin, subscriber, custom entity or admin module, override a Storefront template, decorate a service, write a DAL migration, or handle any other Shopware 6 development task.
-when_to_use: >-
-  Trigger on any mention of: Shopware 6, sw6, Storefront (Twig/SCSS), Admin (Vue.js/Shopware Admin API), DAL (Data Abstraction Layer), App System, manifest.xml, services.xml, EntityRepository, EntityDefinition, EntityExtension, SubscriberInterface, SalesChannelContext, sw-context-token, sw-access-key, StaticEntityRepository, ProductBuilder, PaymentHandlerInterface, MessageBusInterface, Rule (shopware.rule.definition), CMS element, ElasticsearchHelper, HttpCache, CartProcessorInterface, CartValidatorInterface, CartDataCollectorInterface, PercentagePriceDefinition, AbsolutePriceDefinition, SeoUrlRouteInterface, StateMachineRegistry, ThemeInterface, theme.json, FilesystemOperator, RedisConnectionProvider, RateLimiter, EntityIndexer, InAppPurchase, CheckoutGateway, AbstractPaymentHandler, PaymentHandlerType, Meteor Component Library, mt-button/mt-card/mt-text-field, Pinia Shopware.Store, Vite admin build, storefront:dev-server, Twig UX components, manifest-3.0.xsd, migration from Shopware 6.6 to 6.7, or Shopware-specific CLI commands.
-version: 0.3.0
+  Shopware 6 development for plugins, apps and themes, targeting 6.7 and flagging what differs on 6.6.
+  Use when creating or changing a Shopware 6 plugin, app or theme: services.php DI config, event
+  subscribers, service decoration, DAL entity definitions, migrations, custom fields and entity
+  extensions; Storefront Twig overrides, SCSS and JS plugins; Admin modules with Vue 3, Pinia and
+  Meteor mt-* components; Admin API and Store API calls; cart processors, collectors and validators,
+  AbstractPaymentHandler, shipping, rule conditions, CMS elements and flows; manifest.xml, webhooks and
+  App Scripts; SEO URLs, mail templates, documents, state machines, message queue, scheduled tasks,
+  OpenSearch and HTTP cache; PHPUnit, Jest and Playwright tests; deployment; or upgrading from 6.6 to
+  6.7 and preparing code for 6.8.
+license: MIT
+metadata:
+  version: "0.4.0"
+  checked-against: "shopware/shopware v6.7.15.1"
 ---
 
 # Shopware 6 Development
