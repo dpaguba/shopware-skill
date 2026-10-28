@@ -1,15 +1,17 @@
-# Cart — Processors, Collectors, Validators, Discounts, Price Manipulation
+# Cart: Processors, Collectors, Validators, Discounts, Price Manipulation
 
 The Shopware cart pipeline runs on every cart calculation. It follows this order:
 1. **Collectors** gather external data needed for calculation
 2. **Processors** apply changes to the cart
 3. **Validators** check the final cart for errors before checkout
 
+Since 6.7.15, `GET|POST /store-api/checkout/cart` returns the cart already calculated during context resolution, so processors run and `CartLoadedEvent` fires once per request instead of twice.
+
 ---
 
 ## Cart Collector
 
-Collectors implement `CartDataCollectorInterface`. Fetch database or API data here — never in processors.
+Collectors implement `CartDataCollectorInterface`. Fetch database or API data here, never in processors.
 
 ```php
 <?php declare(strict_types=1);
@@ -20,8 +22,10 @@ use Shopware\Core\Checkout\Cart\Cart;
 use Shopware\Core\Checkout\Cart\CartBehavior;
 use Shopware\Core\Checkout\Cart\CartDataCollectorInterface;
 use Shopware\Core\Checkout\Cart\LineItem\CartDataCollection;
+use Shopware\Core\Checkout\Cart\LineItem\LineItem;
 use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
 use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsAnyFilter;
 use Shopware\Core\System\SalesChannel\SalesChannelContext;
 
 class MyCartCollector implements CartDataCollectorInterface
@@ -49,27 +53,39 @@ class MyCartCollector implements CartDataCollectorInterface
 
         $myData = $this->myEntityRepository->search($criteria, $context->getContext());
 
-        foreach ($myData as $item) {
+        foreach ($myData->getEntities() as $item) {
             $data->set('my_plugin_data_' . $item->getProductId(), $item);
         }
     }
 }
 ```
 
-Register with `shopware.cart.collector` tag:
+Register with the `shopware.cart.collector` tag in `src/Resources/config/services.php`:
 
-```xml
-<service id="VendorName\PluginName\Checkout\Cart\MyCartCollector">
-    <argument type="service" id="my_entity.repository"/>
-    <tag name="shopware.cart.collector"/>
-</service>
+```php
+<?php declare(strict_types=1);
+
+use Symfony\Component\DependencyInjection\Loader\Configurator\ContainerConfigurator;
+use VendorName\PluginName\Checkout\Cart\MyCartCollector;
+
+use function Symfony\Component\DependencyInjection\Loader\Configurator\service;
+
+return static function (ContainerConfigurator $containerConfigurator): void {
+    $services = $containerConfigurator->services();
+
+    $services->set(MyCartCollector::class)
+        ->args([service('my_entity.repository')])
+        ->tag('shopware.cart.collector');
+};
 ```
+
+The snippets below are `$services->set(...)` calls inside the same closure.
 
 ---
 
 ## Cart Processor
 
-Processors implement `CartProcessorInterface`. Only modify `$toCalculate` — never `$original`.
+Processors implement `CartProcessorInterface`. Only modify `$toCalculate`, never `$original`.
 
 ```php
 <?php declare(strict_types=1);
@@ -114,16 +130,18 @@ class MyCartProcessor implements CartProcessorInterface
 }
 ```
 
-Register with `shopware.cart.processor` tag and set a `priority`:
+Register with the `shopware.cart.processor` tag and set a `priority`:
 
-```xml
-<service id="VendorName\PluginName\Checkout\Cart\MyCartProcessor">
-    <argument type="service" id="Shopware\Core\Checkout\Cart\Price\QuantityPriceCalculator"/>
-    <tag name="shopware.cart.processor" priority="1000"/>
-</service>
+```php
+use Shopware\Core\Checkout\Cart\Price\QuantityPriceCalculator;
+use VendorName\PluginName\Checkout\Cart\MyCartProcessor;
+
+$services->set(MyCartProcessor::class)
+    ->args([service(QuantityPriceCalculator::class)])
+    ->tag('shopware.cart.processor', ['priority' => 1000]);
 ```
 
-Higher priority = runs earlier. Default product processor priority is around 4900.
+Higher priority = runs earlier. Core priorities: product processor and collector `5000`, promotion collector and processor `4900`, custom line items `4000`, container items `3800`, discount items `3700`, credit items `0`, delivery `-5000`, promotion delivery `-5100`.
 
 ---
 
@@ -168,6 +186,8 @@ class PriceAdjustmentProcessor implements CartProcessorInterface
     }
 }
 ```
+
+To change product prices before promotions see them, register between the product (`5000`) and promotion (`4900`) processors, e.g. priority `4950`.
 
 ---
 
@@ -217,14 +237,18 @@ class DiscountProcessor implements CartProcessorInterface
 }
 ```
 
-Register with priority **below** 4900 so it runs **after** the product processor (which sets product prices at ~4900). Lower number = runs later:
+Register with priority **below** 5000 so it runs **after** the product processor, which sets product prices at 5000. Lower number = runs later:
 
-```xml
-<service id="VendorName\PluginName\Checkout\Cart\DiscountProcessor">
-    <argument type="service" id="Shopware\Core\Checkout\Cart\Price\PercentagePriceCalculator"/>
-    <tag name="shopware.cart.processor" priority="4500"/>
-</service>
+```php
+use Shopware\Core\Checkout\Cart\Price\PercentagePriceCalculator;
+use VendorName\PluginName\Checkout\Cart\DiscountProcessor;
+
+$services->set(DiscountProcessor::class)
+    ->args([service(PercentagePriceCalculator::class)])
+    ->tag('shopware.cart.processor', ['priority' => 4500]);
 ```
+
+From 6.8 (`v6.8.0.0` flag in 6.7), `PercentagePriceCalculator` derives the discount's taxes by scaling the calculated taxes of the referenced items. Expect cent-level differences with mixed tax rates.
 
 ### Absolute Discount
 
@@ -255,6 +279,7 @@ namespace VendorName\PluginName\Checkout\Cart;
 use Shopware\Core\Checkout\Cart\Cart;
 use Shopware\Core\Checkout\Cart\CartValidatorInterface;
 use Shopware\Core\Checkout\Cart\Error\ErrorCollection;
+use Shopware\Core\Checkout\Cart\LineItem\LineItem;
 use Shopware\Core\System\SalesChannel\SalesChannelContext;
 
 class MyCartValidator implements CartValidatorInterface
@@ -280,10 +305,11 @@ class MyCartValidator implements CartValidatorInterface
 
 Register:
 
-```xml
-<service id="VendorName\PluginName\Checkout\Cart\MyCartValidator">
-    <tag name="shopware.cart.validator"/>
-</service>
+```php
+use VendorName\PluginName\Checkout\Cart\MyCartValidator;
+
+$services->set(MyCartValidator::class)
+    ->tag('shopware.cart.validator');
 ```
 
 ### Custom Error Class
@@ -300,8 +326,10 @@ class MyCartBlockedError extends Error
     private const KEY = 'my-plugin-item-blocked';
 
     public function __construct(
-        private readonly string $lineItemId,
-    ) {}
+        protected readonly string $lineItemId,
+    ) {
+        parent::__construct(\sprintf('Line item "%s" cannot be ordered.', $lineItemId));
+    }
 
     public function getId(): string
     {
@@ -330,12 +358,12 @@ class MyCartBlockedError extends Error
 }
 ```
 
-Add snippet for the error message in `snippet/en_GB/my-plugin.en-GB.json`:
+Add snippet for the error message in `snippet/en_GB/my-plugin.en-GB.json`. The Storefront translates `checkout.<messageKey>` and passes each parameter as `%name%`:
 
 ```json
 {
     "checkout": {
-        "my-plugin-item-blocked": "This item cannot be ordered: {{ lineItemId }}"
+        "my-plugin-item-blocked": "This item cannot be ordered: %lineItemId%"
     }
 }
 ```
@@ -352,6 +380,8 @@ Register a custom tax provider to replace the default tax calculation for specif
 namespace VendorName\PluginName\Tax;
 
 use Shopware\Core\Checkout\Cart\Cart;
+use Shopware\Core\Checkout\Cart\Tax\Struct\CalculatedTax;
+use Shopware\Core\Checkout\Cart\Tax\Struct\CalculatedTaxCollection;
 use Shopware\Core\Checkout\Cart\TaxProvider\AbstractTaxProvider;
 use Shopware\Core\Checkout\Cart\TaxProvider\Struct\TaxProviderResult;
 use Shopware\Core\System\SalesChannel\SalesChannelContext;
@@ -362,22 +392,24 @@ class MyTaxProvider extends AbstractTaxProvider
         Cart $cart,
         SalesChannelContext $context
     ): TaxProviderResult {
-        $taxMap = [];
+        $lineItemTaxes = [];
 
         foreach ($cart->getLineItems() as $lineItem) {
             $taxRate = $this->lookupTaxRate($lineItem, $context);
+            $price = $lineItem->getPrice()->getTotalPrice();
 
-            $taxMap[$lineItem->getId()] = new TaxRuleCollection([
-                new TaxRule($taxRate, 100.0),
+            // keyed by uniqueIdentifier, which also resolves nested line items
+            $lineItemTaxes[$lineItem->getUniqueIdentifier()] = new CalculatedTaxCollection([
+                new CalculatedTax($price * $taxRate / 100, $taxRate, $price),
             ]);
         }
 
-        return new TaxProviderResult($taxMap);
+        return new TaxProviderResult($lineItemTaxes);
     }
 }
 ```
 
-Register as a tax provider and link it to a tax provider entity via the Admin UI or migration.
+Register with the `shopware.tax.provider` tag, then create a `tax_provider` entity (migration or Admin) whose `identifier` is the provider's FQCN, with `priority`, `active` and an optional `availabilityRuleId`.
 
 ---
 
@@ -388,7 +420,7 @@ Listen to cart lifecycle events:
 ```php
 use Shopware\Core\Checkout\Cart\Event\CartSavedEvent;
 use Shopware\Core\Checkout\Cart\Event\CartDeletedEvent;
-use Shopware\Core\Checkout\Cart\Order\Event\CheckoutOrderPlacedEvent;
+use Shopware\Core\Checkout\Cart\Event\CheckoutOrderPlacedEvent;
 
 public static function getSubscribedEvents(): array
 {
@@ -404,3 +436,5 @@ public function onOrderPlaced(CheckoutOrderPlacedEvent $event): void
     $context = $event->getSalesChannelContext();
 }
 ```
+
+Read order data from `$event->getOrder()`. From 6.8 (`v6.8.0.0` flag in 6.7) the cart is deleted before `CheckoutOrderPlacedCriteriaEvent` and `CheckoutOrderPlacedEvent` are dispatched, so it cannot be reloaded by its token. Add needed associations via `CheckoutOrderPlacedCriteriaEvent`.
