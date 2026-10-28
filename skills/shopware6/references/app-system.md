@@ -1,4 +1,4 @@
-# App System — manifest.xml, Webhooks, App Scripts
+# App System: manifest.xml, Webhooks, App Scripts
 
 The App System lets you extend Shopware without writing a PHP plugin. Your app lives on an external server; Shopware communicates via signed HTTP requests.
 
@@ -11,18 +11,19 @@ The App System lets you extend Shopware without writing a PHP plugin. Your app l
 
 ```
 custom/apps/MyVendorApp/
-├── manifest.xml              # Required — defines everything
+├── manifest.xml              # Required, defines everything
 ├── Resources/
 │   ├── app/storefront/src/   # Optional: JS/SCSS assets
 │   ├── views/storefront/     # Optional: Twig overrides
 │   ├── config/config.xml     # Optional: Plugin-style config fields
+│   ├── config/custom-fields.xml # Optional: custom field sets (SW 6.7.13+)
 │   └── scripts/              # Optional: App Scripts (Twig-based)
 └── icon.png                  # Optional: shown in admin
 ```
 
 ---
 
-## manifest.xml — Complete Example
+## manifest.xml: Complete Example
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -40,7 +41,7 @@ custom/apps/MyVendorApp/
         <version>1.0.0</version>
         <icon>icon.png</icon>
         <license>MIT</license>
-        <compatibility>~6.6.0</compatibility>
+        <compatibility>~6.7.0</compatibility>
         <privacy>https://my-vendor.com/privacy</privacy>
     </meta>
 
@@ -60,13 +61,14 @@ custom/apps/MyVendorApp/
         <update>order</update>
     </permissions>
 
-    <!-- Allowlist for outbound requests Shopware makes to your app -->
+    <!-- Hosts your app talks to. Since 6.7.14 Extension SDK action and URI-signing targets
+         must be absolute URLs on one of these hosts. -->
     <allowed-hosts>
         <host>my-app.com</host>
         <host>api.external-service.com</host>
     </allowed-hosts>
 
-    <!-- Webhooks — Shopware calls your URL on these events -->
+    <!-- Webhooks: Shopware calls your URL on these events -->
     <webhooks>
         <webhook name="orderPlaced"
                  url="https://my-app.com/webhooks/order-placed"
@@ -95,29 +97,9 @@ custom/apps/MyVendorApp/
         </module>
     </admin>
 
-    <!-- Custom fields added to existing entities -->
-    <!-- Deprecated since SW 6.7.13, removed in 6.8: move this block to a separate
-         Resources/config/custom-fields.xml at the app root, same syntax.
-         See references/dal.md for the field element list. -->
-    <custom-fields>
-        <custom-field-set>
-            <name>my_app_product_fields</name>
-            <label>My App Fields</label>
-            <label lang="de-DE">Meine App Felder</label>
-            <related-entities>
-                <product/>
-            </related-entities>
-            <fields>
-                <text name="my_app_external_id">
-                    <label>External ID</label>
-                    <required>false</required>
-                </text>
-                <bool name="my_app_sync_enabled">
-                    <label>Sync Enabled</label>
-                </bool>
-            </fields>
-        </custom-field-set>
-    </custom-fields>
+    <!-- Custom fields: Resources/config/custom-fields.xml (below). The inline <custom-fields>
+         block is deprecated since SW 6.7.13 and removed in 6.8; keep it only for apps that
+         must still install on older versions. -->
 
     <!-- Cookie consent registration -->
     <cookies>
@@ -130,8 +112,11 @@ custom/apps/MyVendorApp/
 
     <!-- Payment method provided by your app.
          SW 6.7: manifest schema is manifest-3.0.xsd, <capture-url> was removed, use <pay-url>.
-         Payment states are no longer set by default for async payments: the app must transition
-         the transaction itself. The finalize call now delivers query parameters under `requestData`. -->
+         Payment states are no longer set by default for async payments: return "status" (a
+         transition action such as paid, authorize, process, fail, cancel) in the signed pay or
+         finalize response, otherwise the transaction stays open. The finalize call delivers query
+         parameters under `requestData`. Optional: <validate-url>, <refund-url>, <recurring-url>.
+         Since 6.7.15 app updates no longer overwrite existing name/description translations. -->
     <payments>
         <payment-method>
             <identifier>my_app_payment</identifier>
@@ -145,60 +130,123 @@ custom/apps/MyVendorApp/
 </manifest>
 ```
 
+### Custom fields: `Resources/config/custom-fields.xml`
+
+Same syntax as the old inline block. Shopware prefers this file when both exist. See references/dal.md for the
+field element list. Since 6.7.14 `media_folder` and `media_folder_configuration` are allowed related entities.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<custom-fields xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/shopware/shopware/trunk/src/Core/System/CustomField/Schema/custom-fields-1.0.xsd">
+    <custom-field-set>
+        <name>my_app_product_fields</name>
+        <label>My App Fields</label>
+        <label lang="de-DE">Meine App Felder</label>
+        <related-entities>
+            <product/>
+        </related-entities>
+        <fields>
+            <text name="my_app_external_id">
+                <label>External ID</label>
+                <required>false</required>
+            </text>
+            <bool name="my_app_sync_enabled">
+                <label>Sync Enabled</label>
+            </bool>
+        </fields>
+    </custom-field-set>
+</custom-fields>
+```
+
+### Document types (SW 6.7.15+, experimental)
+
+Apps can register document types for document generation v2 (`DOCUMENT_GENERATION_REWORK` flag). Shopware seeds a
+number range per type; the `document-generation` app script hook can enrich the render data.
+
+```xml
+<documents>
+    <document-type>
+        <identifier>my_app_warranty</identifier>
+        <label>Warranty certificate</label>
+        <formats>
+            <format>html</format>
+            <format>pdf</format>
+        </formats>
+    </document-type>
+</documents>
+```
+
 ---
 
 ## Registration Handshake
 
 When Shopware installs the app it performs a 3-step handshake:
 
-### Step 1 — Shopware → Your App (POST /shopware/register)
+### Step 1: Shopware → Your App (GET /shopware/register)
+
+Shopware sends `GET <registrationUrl>?shop-id=...&shop-url=...&timestamp=...` with `shopware-app-signature`, an
+HMAC-SHA256 of the query string keyed with the app secret (`<setup><secret>` locally, the Store secret otherwise).
 
 ```php
-#[Route(path: '/shopware/register', methods: ['POST'])]
+#[Route(path: '/shopware/register', methods: ['GET'])]
 public function register(Request $request): JsonResponse
 {
-    $body      = $request->getContent();
-    $signature = $request->headers->get('shopware-app-signature');
-    $expected  = hash_hmac('sha256', $body, $this->appSecret);
+    // Raw query string: Request::getQueryString() re-normalizes it and breaks the HMAC
+    $query     = (string) $request->server->get('QUERY_STRING');
+    $signature = (string) $request->headers->get('shopware-app-signature', '');
+    $expected  = hash_hmac('sha256', $query, $this->appSecret);
 
     if (!hash_equals($expected, $signature)) {
         return new JsonResponse(['error' => 'Invalid signature'], 401);
     }
 
-    $payload = json_decode($body, true);
-    $shopId  = $payload['shop-id'];
-    $shopUrl = $payload['shop-url'];
+    $shopId     = $request->query->getString('shop-id');
+    $shopUrl    = $request->query->getString('shop-url');
+    $shopSecret = bin2hex(random_bytes(32)); // per-shop secret for all later requests
 
-    $this->shopRepository->save($shopId, $shopUrl);
+    $this->shopRepository->savePending($shopId, $shopUrl, $shopSecret);
 
     // $appName must match the <name> tag in manifest.xml exactly
-    $appName = 'MyApp'; // same value as <name> in manifest.xml
+    $appName = 'MyVendorApp';
     return new JsonResponse([
         'proof'            => hash_hmac('sha256', $shopId . $shopUrl . $appName, $this->appSecret),
-        'secret'           => bin2hex(random_bytes(32)), // per-shop secret for future webhook verification
+        'secret'           => $shopSecret,
         'confirmation_url' => 'https://my-app.com/shopware/confirm',
     ]);
 }
 ```
 
-### Step 2 — Shopware → Your App (POST /shopware/confirm)
+### Step 2: Shopware → Your App (POST /shopware/confirm)
+
+The JSON body (`apiKey`, `secretKey`, `timestamp`, `shopUrl`, `shopId`) is signed in `shopware-shop-signature` with
+the per-shop secret you just returned. On re-registration a `shopware-shop-signature-previous` header signed with
+the old secret is added. Since 6.7.14 the shop only switches to the new secret after this call answered 2xx, and
+re-running `app:install` recovers an interrupted handshake, so keep the old secret until the confirm arrives.
 
 ```php
 #[Route(path: '/shopware/confirm', methods: ['POST'])]
 public function confirm(Request $request): JsonResponse
 {
-    $payload = json_decode($request->getContent(), true);
+    $body    = $request->getContent();
+    $payload = json_decode($body, true, flags: \JSON_THROW_ON_ERROR);
+    $shop    = $this->shopRepository->findByShopId($payload['shopId']);
 
-    $shop = $this->shopRepository->findByShopId($payload['shopId']);
+    $expected = hash_hmac('sha256', $body, $shop->getPendingSecret());
+    if (!hash_equals($expected, (string) $request->headers->get('shopware-shop-signature', ''))) {
+        return new JsonResponse(['error' => 'Invalid signature'], 401);
+    }
+
     $shop->setApiKey($payload['apiKey']);
     $shop->setSecretKey($payload['secretKey']);
+    $shop->commitPendingSecret();
     $this->shopRepository->save($shop);
 
     return new JsonResponse(['success' => true]);
 }
 ```
 
-### Step 3 — Call Shopware Admin API from Your App
+### Step 3: Call Shopware Admin API from Your App
 
 ```php
 $client = new GuzzleHttp\Client();
@@ -217,56 +265,65 @@ $token = json_decode($response->getBody(), true)['access_token'];
 
 ## Webhook Verification
 
-Every webhook Shopware sends includes a `shopware-shop-signature` header. Verify it:
+Every webhook is a POST with a JSON body `{"data": {"payload": ..., "event": "..."}, "source": {"url", "shopId",
+"appVersion", "eventId"}, "timestamp": ...}` and a `shopware-shop-signature` header (HMAC-SHA256 of the raw body
+with the per-shop secret). Verify it:
 
 ```php
 public function handleOrderPlaced(Request $request): JsonResponse
 {
-    $shopId    = $request->query->get('shop-id', '');
-    $secret    = $this->shopRepository->getSecretByShopId($shopId);
+    $body    = $request->getContent();
+    $payload = json_decode($body, true, flags: \JSON_THROW_ON_ERROR);
+    $secret  = $this->shopRepository->getSecretByShopId($payload['source']['shopId'] ?? '');
 
-    $body      = $request->getContent();
-    $signature = $request->headers->get('shopware-shop-signature');
+    $signature = (string) $request->headers->get('shopware-shop-signature', '');
     $expected  = hash_hmac('sha256', $body, $secret);
 
     if (!hash_equals($expected, $signature)) {
         return new JsonResponse(['error' => 'Unauthorized'], 401);
     }
 
-    $payload = json_decode($body, true);
-    $orderId = $payload['data']['payload'][0]['primaryKey'] ?? null;
+    // Business events (checkout.order.placed) carry their flow data by name
+    $orderId = $payload['data']['payload']['order']['id'] ?? null;
+    // Entity events (product.written) carry write results:
+    // $payload['data']['payload'][0]['primaryKey']
 
     return new JsonResponse(['success' => true]);
 }
 ```
 
+> **SW 6.7.14.1.** `user.recovery.request`, `customer.recovery.request`, `mail.before.send` and
+> `mail.after.create.message` are no longer delivered to webhooks (a manifest subscribing to them triggers a
+> deprecation now and is rejected with `WebhookNotPermittedError` in 6.8). Removed from payloads: `contextToken`
+> of `checkout.customer.login`, `confirmUrl` of the double opt-in events, `url` of `newsletter.register`, and
+> customer confirmation hashes. All stay available in Flow Builder.
+
 ---
 
 ## App Scripts (Twig-based, no PHP server needed)
 
-App Scripts run inside Shopware's process — no external server required. They use Twig with a restricted sandbox.
+App Scripts run inside Shopware's process, so no external server is required. They use Twig with a restricted sandbox.
 
 Place scripts in `Resources/scripts/{hook-name}/`:
 
 ```
 Resources/scripts/
-├── checkout-cart/
-│   └── cart-manipulation.twig      # Runs on every cart calculation
+├── cart/
+│   └── add-free-gift.twig          # Runs on every cart calculation
 ├── product-page-loaded/
 │   └── add-custom-data.twig        # Runs after product page loads
-└── storefront-request/
-    └── redirect.twig               # Runs on every storefront request
+└── store-api-my-endpoint/
+    └── my-endpoint.twig            # Custom endpoint /store-api/script/my-endpoint
 ```
 
 ### Cart Manipulation Script
 
-```twig
-{# Resources/scripts/checkout-cart/add-discount.twig #}
-{% set cart = hook.cart %}
-{% set services = hook.services %}
+`services` is a global script variable; `hook` holds the hook data (`hook.cart` here).
 
-{% if cart.lineItems.count > 0 %}
-    {# Add a product to the cart — use services.cart.products facade #}
+```twig
+{# Resources/scripts/cart/add-free-gift.twig #}
+{% if services.cart.items.count > 0 and not services.cart.products.has('PRODUCT_ID') %}
+    {# Add a product to the cart via the services.cart.products facade #}
     {% do services.cart.products.add('PRODUCT_ID', 1) %}
 {% endif %}
 ```
@@ -298,12 +355,17 @@ Access in Twig template:
 
 | Hook | When it fires |
 |---|---|
-| `checkout-cart` | Every cart calculation |
+| `cart` | Every cart calculation |
+| `product-pricing` | Product prices are calculated |
+| `product-page-loaded` | Product detail page load (most storefront pages have a `*-page-loaded` hook) |
 | `checkout-cart-page-loaded` | Cart page load |
 | `checkout-confirm-page-loaded` | Confirm page load |
-| `product-page-loaded` | Product detail page load |
-| `storefront-request` | Every storefront HTTP request |
-| `order-placed` | After order is placed |
+| `cookie-group-collect` | Cookie groups collected (SW 6.7.14+): modify or remove groups and entries |
+| `document-generation` | Document v2 rendering (SW 6.7.15+, experimental) |
+| `api-{name}`, `store-api-{name}`, `storefront-{name}` | Custom endpoints `/api/script/{name}`, `/store-api/script/{name}`, `/storefront/script/{name}` |
+| `app-installed`, `app-updated`, `app-activated`, `app-deactivated`, `app-deleted` | App lifecycle |
+
+There is no order-placed script hook: react to `checkout.order.placed` with a webhook.
 
 ---
 
@@ -330,9 +392,10 @@ Action buttons appear in Admin entity detail/list pages and call your app's URL:
 </admin>
 ```
 
-Shopware sends a signed POST to your URL with the selected entity IDs:
+`entity` is one of `product`, `order`, `category`, `promotion`, `customer`, `cms_page`; `view` is `detail` or `list`.
+Shopware sends a POST signed with `shopware-shop-signature` with the selected entity IDs:
 
-```php
+```json
 {
     "source": {
         "url": "https://shop.example.com",
@@ -343,9 +406,21 @@ Shopware sends a signed POST to your URL with the selected entity IDs:
         "ids": ["product-uuid-1", "product-uuid-2"],
         "entity": "product",
         "action": "syncProduct"
+    },
+    "meta": {
+        "timestamp": 1761650000,
+        "reference": "random-uuid",
+        "language": "language-uuid"
     }
 }
 ```
+
+Answer with an empty 2xx body, or with `{"actionType": "notification", "payload": {"status": "success", "message":
+"Synced"}}` (also `openNewTab`, `reload`, `openModal`) signed in a `shopware-app-signature` header (HMAC-SHA256 of
+the response body with the per-shop secret); unsigned responses with a body are rejected.
+
+Since 6.7.14 Administration users and integrations need the `app.all` or `app.<AppName>` privilege to see the app's
+modules and run its Extension SDK actions.
 
 ---
 
@@ -353,7 +428,7 @@ Shopware sends a signed POST to your URL with the selected entity IDs:
 
 ```xml
 <permissions>
-    <!-- Available: read, create, update, delete -->
+    <!-- Available: read, create, update, delete, crud (all four), permission (an extra ACL privilege) -->
     <read>product</read>
     <read>order</read>
     <read>customer</read>      <!-- Requires privacy policy disclosure! -->
@@ -370,15 +445,20 @@ Request only what is needed. Over-permissioning is a rejection reason in the Sho
 ## Testing App Registration Locally
 
 ```bash
-# Use ngrok to expose local server
+# With APP_ENV=dev (SW 6.7.15+) shopware.app_system.enable_url_validation is false, so HTTP and
+# private hosts work directly. Otherwise (and in prod) targets need HTTPS on a public host:
 ngrok http 8000
 
 # Update manifest.xml with ngrok URL:
 # <registrationUrl>https://abc123.ngrok.io/shopware/register</registrationUrl>
 
-# Install in local Shopware:
+# Validate and install in local Shopware:
+bin/console app:validate MyVendorApp
 bin/console app:install MyVendorApp --activate
 
 # Check registration status:
 bin/console app:list
 ```
+
+Keep `enable_url_validation` enabled in production; while it is `false`, `allow_unencrypted_traffic` and
+`allowed_private_ip_addresses` have no effect.
