@@ -1,10 +1,10 @@
-# DevOps — Logging, Static Analysis, CI/CD, Media, Debugging
+# DevOps: Logging, Static Analysis, CI/CD, Media, Debugging
 
 ---
 
 ## Structured Logging
 
-Always inject `LoggerInterface` — never use `error_log()`, `var_dump()`, or `dump()` in production code.
+Always inject `LoggerInterface`. Never use `error_log()`, `var_dump()`, or `dump()` in production code.
 
 ```php
 use Psr\Log\LoggerInterface;
@@ -39,14 +39,14 @@ class MyService
 }
 ```
 
-Inject in services.xml:
+Inject in `src/Resources/config/services.php`:
 
-```xml
-<service id="VendorName\PluginName\Service\MyService">
-    <argument type="service" id="logger"/>
-    <!-- Or a dedicated channel: -->
-    <argument type="service" id="monolog.logger.my_plugin"/>
-</service>
+```php
+use VendorName\PluginName\Service\MyService;
+
+$services->set(MyService::class)
+    ->args([service('logger')]);
+    // Or a dedicated channel: ->args([service('monolog.logger.my_plugin')])
 ```
 
 ### Custom Monolog Channel
@@ -102,11 +102,14 @@ parameters:
     bootstrapFiles:
         - vendor/autoload.php
     symfony:
-        container_xml_path: var/cache/dev_*/srcDevDebugProjectContainer.xml
+        # written on boot with APP_DEBUG=1; the hash changes with the set of active plugins
+        containerXmlPath: var/cache/dev_h<hash>/Shopware_Core_KernelDevDebugContainer.xml
     ignoreErrors:
         # Shopware-specific dynamic property access
         - '#Access to an undefined property Shopware\\Core\\Framework\\DataAbstractionLayer\\Entity::#'
 ```
+
+Since 6.7.14, planned BC changes that are not removals are marked with attributes from `Shopware\Core\Framework\Deprecation\BCChange` (`#[ReturnTypeNarrowing]`, `#[NewOptionalParameter]`, `#[BecomesFinal]`, `#[ExperimentalReplacement]`, ...). A `@deprecated` tag on core code now always means removal, so `phpstan-deprecation-rules` reports only those.
 
 ### Run
 
@@ -120,8 +123,8 @@ vendor/bin/phpstan analyse src --configuration=phpstan.neon
 ### PHP CS Fixer
 
 ```php
-// .php-cs-fixer.php
 <?php
+// .php-cs-fixer.php
 
 $finder = PhpCsFixer\Finder::create()
     ->in(__DIR__ . '/src')
@@ -206,6 +209,23 @@ jobs:
 
 ## Deployment
 
+Recommended for 6.7: build the artifact with Shopware CLI, deploy with the Deployment Helper (`composer require shopware/deployment-helper`, 6.5.8+):
+
+```bash
+# CI build: composer install (no dev), extension assets, snippet merge, SBOM
+shopware-cli project ci .
+
+# On the target: installs Shopware on first run; on updates runs system:update:finish
+# (only if the version changed), refreshes/installs/updates extensions, compiles themes,
+# runs one-time tasks and hooks
+vendor/bin/shopware-deployment-helper run
+# --skip-theme-compile / --skip-assets-install only if the build already produced them
+```
+
+Configure it in `.config/shopware-project.yml` (`deployment.hooks.pre|post|pre-install|post-install|pre-update|post-update`, `deployment.extension-management`, `deployment.one-time-tasks`, `deployment.maintenance.enabled`, `deployment.cache.always_clear`). Docs: https://developer.shopware.com/docs/guides/hosting/installation-updates/deployments/deployment-helper.html
+
+Manual sequence, if you do not use the helper:
+
 ```bash
 # Standard deployment sequence
 composer install --no-dev --optimize-autoloader
@@ -224,7 +244,7 @@ bin/console plugin:refresh
 bin/build-administration.sh
 bin/build-storefront.sh
 
-# Compile theme
+# Compile theme (--no-cleanup is deprecated and has no effect since 6.7.15.1: drop it)
 bin/console theme:compile
 bin/console theme:change --all MyTheme  # if needed
 
@@ -235,6 +255,8 @@ bin/console cache:warmup
 # Restart message queue workers (example: supervisord)
 supervisorctl restart shopware-worker:*
 ```
+
+Old `public/theme/<hash>` directories are removed only by the `theme.delete_files` scheduled task (marked `.retired`, deleted 24 to 48 hours after the switch since 6.7.15.1), so scheduled tasks must run. Workers should consume `webhook async low_priority` (see performance.md).
 
 ### Development Setup
 
@@ -308,10 +330,13 @@ bin/console debug:router
 # Show event subscribers
 bin/console debug:event-dispatcher
 
-# Dump container to XML file (for PHPStan Symfony plugin)
-bin/console debug:container --file=var/cache/container.xml
+# Container XML for the PHPStan Symfony plugin: written automatically in debug mode to
+# var/cache/<env>_h<hash>/Shopware_Core_Kernel<Env>DebugContainer.xml (no dump command needed)
 
-# Check DAL entity definition
+# Validate DAL entity definitions
+bin/console dal:validate
+
+# List business events (Flow Builder triggers)
 bin/console debug:business-events
 
 # Show installed plugins
@@ -323,7 +348,6 @@ bin/console plugin:list
 ## Media Handling
 
 ```php
-use Shopware\Core\Content\Media\MediaService;
 use Shopware\Core\Content\Media\File\FileSaver;
 use Shopware\Core\Content\Media\File\MediaFile;
 use Shopware\Core\Framework\Uuid\Uuid;
@@ -331,7 +355,6 @@ use Shopware\Core\Framework\Uuid\Uuid;
 class MyMediaService
 {
     public function __construct(
-        private readonly MediaService $mediaService,
         private readonly FileSaver $fileSaver,
         private readonly EntityRepository $mediaRepository,
         private readonly EntityRepository $mediaFolderRepository,
@@ -353,7 +376,8 @@ class MyMediaService
             filesize($filePath)
         );
 
-        $this->fileSaver->persistFileToMedia($mediaFile, $fileName, $mediaId, $context);
+        // destination = file name minus extension; the extension comes from MediaFile
+        $this->fileSaver->persistFileToMedia($mediaFile, pathinfo($fileName, PATHINFO_FILENAME), $mediaId, $context);
 
         if ($folderId) {
             $this->mediaRepository->update([
@@ -384,6 +408,8 @@ class MyMediaService
 }
 ```
 
+`MediaService::saveMediaFile($mediaFile, $fileNameWithoutExtension, $context, 'product', private: false)` creates and persists in one call, in the default folder of that entity. `private` defaults to `true` there.
+
 ### Link Media to Entity
 
 ```php
@@ -402,11 +428,31 @@ $this->productRepository->update([
 bin/console media:generate-thumbnails
 # Or for a specific folder:
 bin/console media:generate-thumbnails --folder-name="My Plugin Uploads"
+# 6.7.14+: regenerate existing thumbnails too (same paths, so CDN/browser caches may serve old files)
+bin/console media:generate-thumbnails --force
+# 6.7.14+: remove orphaned thumbnail files only (safe in every setup)
+bin/console media:delete-local-thumbnails --orphans
 ```
 
 ---
 
 ## Upgrade & Migration Safety
+
+### XML Configuration Is Deprecated (6.7.14+)
+
+Loading `services.xml`, `routes.xml` and `packages/**/*.xml` from plugins, bundles and the project `config/` directory is deprecated since 6.7.14 and removed in 6.8 (Symfony 8 drops XML config). Each loaded XML file already triggers a deprecation log entry that names the file and, for plugins, the bundle. Plugins that still ship them fail to load on 6.8. Migrate to `services.php` (`ContainerConfigurator`) and `routes.php` (`RoutingConfigurator`); ids, arguments and tags stay identical, YAML stays supported. `config.xml`, `custom-fields.xml` and app manifests are not affected.
+
+`src/Resources/config/routes.php` (for `services.php` see plugin-structure.md):
+
+```php
+<?php declare(strict_types=1);
+
+use Symfony\Component\Routing\Loader\Configurator\RoutingConfigurator;
+
+return static function (RoutingConfigurator $routes): void {
+    $routes->import('../../Storefront/Controller/**/*Controller.php', 'attribute');
+};
+```
 
 ### Backward-Compatible Migrations
 
@@ -418,15 +464,8 @@ public function update(Connection $connection): void
         CREATE TABLE IF NOT EXISTS `my_table` (...)
     ');
 
-    $schemaManager = $connection->createSchemaManager();
-    $columns = array_keys($schemaManager->listTableColumns('product'));
-
-    if (!in_array('my_plugin_score', $columns)) {
-        $connection->executeStatement('
-            ALTER TABLE `product`
-            ADD COLUMN `my_plugin_score` FLOAT NULL
-        ');
-    }
+    // MigrationStep helper: no-op if the column exists, retries on MySQL 8.4 bug #118151 (6.7.14+)
+    $this->addColumn($connection, 'product', 'my_plugin_score', 'FLOAT');
 }
 
 public function updateDestructive(Connection $connection): void
@@ -434,11 +473,12 @@ public function updateDestructive(Connection $connection): void
     // Only destructive ops here (DROP TABLE, DROP COLUMN)
     // These run only when explicitly called:
     // bin/console database:migrate-destructive --all
-    $connection->executeStatement('
-        ALTER TABLE `product` DROP COLUMN IF EXISTS `my_plugin_score`
-    ');
+    // MySQL has no DROP COLUMN IF EXISTS; the helper returns false if the column is missing
+    $this->dropColumnIfExists($connection, 'product', 'my_plugin_score');
 }
 ```
+
+Other raw DDL that may hit MySQL 8.4's `restrict_fk_on_non_standard_key` should go through `$this->executeDdlStatement($connection, $sql)` (marked `@internal` only because it disappears once MySQL fixes the bug).
 
 ### Version Check in Plugin Bootstrap
 
