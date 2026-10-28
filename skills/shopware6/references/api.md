@@ -1,4 +1,4 @@
-# API — Store API & Admin API
+# API: Store API & Admin API
 
 Shopware 6 provides two distinct APIs:
 
@@ -11,11 +11,14 @@ Shopware 6 provides two distinct APIs:
 
 ---
 
-## Admin API — Authentication
+## Admin API: Authentication
 
-> **SW 6.7.** `/api/oauth/authorize` was removed and non spec-compliant `/api/oauth/token` requests are
-> rejected: send `Content-Type: application/json` or `application/x-www-form-urlencoded` with the exact
-> grant parameters. RSA JWT secrets were removed. 6.7.1 added new Admin API request headers.
+> **SW 6.7.** Non spec-compliant `/api/oauth/token` requests are rejected: send `Content-Type: application/json` or
+> `application/x-www-form-urlencoded` with the exact grant parameters, and `scope` as a space-delimited string
+> (`"write admin"`), not an array. RSA JWT secrets were removed. 6.7.0 removed the old `/api/oauth/authorize`;
+> 6.7.15 reintroduces `GET /api/oauth/authorize` for the authorization code grant (below). 6.7.1 added the
+> `sw-measurement-weight-unit` / `sw-measurement-length-unit` request headers to read and write product
+> measurements in other units.
 
 
 ```bash
@@ -41,9 +44,27 @@ curl -X GET https://shopware.test/api/product \
   -H 'Accept: application/json'
 ```
 
+Integrations use `"grant_type": "client_credentials"` with `client_id` (access key) and `client_secret`.
+
+### Browser login for CLI tools (SW 6.7.15+)
+
+Registered public clients (Shopware ships `shopware-cli`) can use the authorization code grant with PKCE instead
+of storing a password or integration secret:
+
+1. Open `GET /api/oauth/authorize?response_type=code&client_id=...&redirect_uri=...&code_challenge=...&code_challenge_method=S256`
+   in the browser. The user signs in to the Administration and approves on its consent page.
+2. Exchange the code: `POST /api/oauth/token` with `grant_type=authorization_code`, `client_id`, `code`,
+   `redirect_uri`, `code_verifier`. Codes are single use. Refresh with `grant_type=refresh_token` and the same
+   `client_id`; refresh tokens rotate and reusing an old one revokes the whole token family.
+
+Register own clients in `config/packages/shopware.yaml` under `shopware.api.oauth_clients.<id>` (`name`,
+`redirect_uris`). Loopback URIs (`http://127.0.0.1/callback`) accept any port, all others must match exactly.
+Code lifetime: `shopware.api.auth_code_ttl` (default `PT5M`). An unregistered redirect URI returns 400
+`FRAMEWORK__OAUTH_INVALID_REDIRECT_URI`.
+
 ---
 
-## Admin API — CRUD via JSON:API
+## Admin API: CRUD via JSON:API
 
 ### List (with filters)
 
@@ -53,10 +74,11 @@ curl -X GET 'https://shopware.test/api/product' \
   -G \
   --data-urlencode 'filter[active]=1' \
   --data-urlencode 'sort=-createdAt' \
-  --data-urlencode 'page[limit]=25'
+  --data-urlencode 'limit=25' \
+  --data-urlencode 'page=1'
 ```
 
-### Search (POST — more powerful)
+### Search (POST, more powerful)
 
 ```bash
 curl -X POST 'https://shopware.test/api/search/product' \
@@ -112,7 +134,7 @@ curl -X DELETE 'https://shopware.test/api/product/{id}' \
 
 ---
 
-## Admin API — Bulk Operations
+## Admin API: Bulk Operations
 
 ```bash
 curl -X POST 'https://shopware.test/api/_action/sync' \
@@ -171,6 +193,7 @@ curl -X POST 'https://shopware.test/store-api/checkout/cart/line-item' \
 
 namespace VendorName\PluginName\Core\Content\MyRoute;
 
+use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
 use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
 use Shopware\Core\System\SalesChannel\SalesChannelContext;
 use Symfony\Component\HttpFoundation\Request;
@@ -179,6 +202,8 @@ use Symfony\Component\Routing\Attribute\Route;
 #[Route(defaults: ['_routeScope' => ['store-api']])]
 class MyStoreApiRoute extends AbstractMyRoute
 {
+    public function __construct(private readonly EntityRepository $myRepository) {}
+
     #[Route(
         path: '/store-api/my-plugin/my-route',
         name: 'store-api.my_plugin.my_route',
@@ -189,12 +214,12 @@ class MyStoreApiRoute extends AbstractMyRoute
     {
         $result = $this->myRepository->search($criteria, $context->getContext());
 
-        return new MyRouteResponse($result);
+        return new MyRouteResponse($result); // MyRouteResponse extends StoreApiResponse
     }
 }
 ```
 
-Create an abstract route to enable the decoration pattern — other plugins can decorate your route:
+Create an abstract route to enable the decoration pattern, so other plugins can decorate your route:
 
 ```php
 abstract class AbstractMyRoute
@@ -238,15 +263,28 @@ class MyStoreApiRouteDecorator extends AbstractMyRoute
 }
 ```
 
-Register decorator in `services.xml`:
+Register route and decorator in `src/Resources/config/services.php` (XML service config is deprecated since
+6.7.14 and removed in 6.8; PHP config works on 6.6 and 6.7 too):
 
-```xml
-<service id="VendorName\PluginName\Decorator\MyStoreApiRouteDecorator"
-         decorates="VendorName\PluginName\Core\Content\MyRoute\MyStoreApiRoute">
-    <argument type="service"
-              id="VendorName\PluginName\Decorator\MyStoreApiRouteDecorator.inner"/>
-</service>
+```php
+use VendorName\PluginName\Core\Content\MyRoute\MyStoreApiRoute;
+use VendorName\PluginName\Decorator\MyStoreApiRouteDecorator;
+
+use function Symfony\Component\DependencyInjection\Loader\Configurator\service;
+
+$services->set(MyStoreApiRoute::class)
+    ->args([service('my_entity.repository')])
+    ->public();
+
+$services->set(MyStoreApiRouteDecorator::class)
+    ->decorate(MyStoreApiRoute::class)
+    ->args([service('.inner')]);
 ```
+
+A custom request header your frontend sends cross-origin must be added to the API CORS lists (SW 6.7.15+):
+implement `Shopware\Core\Framework\Api\Cors\CorsHeaderProviderInterface::provide(CorsHeaders $headers)` and call
+`$headers->addAllowed('x-my-header')` / `addExposed(...)`. Autoconfigured services are picked up, otherwise tag
+with `shopware.api.cors_header_provider`. The lists are global, not scoped to your routes.
 
 ---
 
@@ -271,13 +309,25 @@ class MyAdminController extends AbstractController
 }
 ```
 
+> **SW 6.7.14.** Many core `/api/_action/*` endpoints that only required a token now enforce ACL privileges
+> (number ranges, order recalculation, SEO URLs, media actions, message queue, increments, mail and product
+> export rendering, `trigger-event`). Integrations with a hand-picked privilege list get 403
+> `FRAMEWORK__MISSING_PRIVILEGE_ERROR` until the privilege is added to their role. 6.7.14.1: cloning users and
+> integrations via `/api/_action/clone/...` returns 403, and aggregation names containing a backtick, `?`, `:` or
+> control characters are rejected with 400 `FRAMEWORK__INVALID_AGGREGATION_QUERY`.
+
 ---
 
 ## API Versioning
 
-The Admin API does **not** use version prefixes. The `/api/v1/` path was removed in SW 6.4.0.0 — all routes are at `/api/`. Do not use versioned prefixes.
+The Admin API does **not** use version prefixes. The `/api/v1/` path was removed in SW 6.4.0.0: all routes are at `/api/`. Do not use versioned prefixes.
 
-Store API does not use versioning — it is backward-compatible within a major release.
+Store API does not use versioning either; it is backward-compatible within a major release.
+
+To fail fast on an incompatible shop, send `sw-expect-packages: shopware/core:~6.7.0,swag/paypal:*` with an
+authenticated request (417 `FRAMEWORK__API_EXPECTATION_FAILED` on mismatch). Since 6.7.14 the header is rejected
+with 417 `FRAMEWORK__API_EXPECTATION_NOT_SUPPORTED` on unauthenticated endpoints, including `POST /api/oauth/token`,
+so do not set it as an HTTP client default.
 
 ---
 
@@ -328,16 +378,18 @@ Store API does not use versioning — it is backward-compatible within a major r
 | GET/POST | `/api/sales-channel` | Sales channels |
 | POST | `/api/search/{entity}` | Advanced search |
 | POST | `/api/_action/sync` | Bulk operations |
-| POST | `/api/_action/media/{mediaId}/upload-url` | Media upload |
+| POST | `/api/_action/media/{mediaId}/upload?extension=jpg&fileName=x` | Upload a file into an existing media entity (binary body, or JSON `{"url": ...}`) |
 | GET | `/api/_info/openapi3.json` | OpenAPI spec |
 
 ---
 
-## Store API — Context Token Lifecycle
+## Store API: Context Token Lifecycle
 
 The Store API is stateless. All session state is carried via the `sw-context-token` header.
 
-**Always persist the token returned in every response** — it can change after login, registration, or context switches.
+**Persist the token whenever a response carries `sw-context-token`**: it changes after login, registration,
+logout or context switches. With `CACHE_REWORK` or the 6.8 flag active (SW 6.7.15+), cacheable reads no longer
+echo the header, so keep the stored token when it is absent.
 
 ```
 Anonymous visit
@@ -352,12 +404,12 @@ Guest adds to cart
 Customer logs in (pass old token to trigger cart merge)
   → POST /store-api/account/login
     sw-context-token: ANON_TOKEN
-  ← sw-context-token: AUTH_TOKEN    (new token — update stored value!)
+  ← sw-context-token: AUTH_TOKEN    (new token, update stored value!)
 
 Customer logs out
   → POST /store-api/account/logout
     sw-context-token: AUTH_TOKEN
-  ← 204 No Content                  (token is now invalid — get a fresh one)
+  ← sw-context-token: NEW_ANON_TOKEN (old token is invalid, store the new one)
 
 Token expired / 403 received
   → GET /store-api/context           (no token)
@@ -370,6 +422,8 @@ Token expired / 403 received
 sw-access-key: <sales-channel-api-key>   # always required
 sw-context-token: <token>                # required for cart, account, checkout
 Content-Type: application/json           # for POST/PATCH
+sw-language-id / sw-currency-id: <id>    # optional; unavailable currencies are rejected since 6.7.15
+sw-include-seo-urls: 1                   # optional; adds seoUrls (part of Vary since 6.7.15)
 ```
 
 ### Get or Create Context
@@ -396,7 +450,7 @@ PATCH /store-api/context
 
 ---
 
-## Store API — Cart Operations
+## Store API: Cart Operations
 
 ```bash
 # Get current cart
@@ -424,6 +478,7 @@ PATCH /store-api/checkout/cart/line-item
 
 # Remove item
 DELETE /store-api/checkout/cart/line-item?ids[]=LINE_ITEM_ID
+# or, for clients that cannot send DELETE: POST /store-api/checkout/cart/line-item/delete {"ids": [...]}
 
 # Add promotion code
 POST /store-api/checkout/cart/line-item
@@ -440,7 +495,7 @@ DELETE /store-api/checkout/cart
 
 ---
 
-## Store API — Checkout
+## Store API: Checkout
 
 ```bash
 # 1. Set shipping address (or use existing customer address)
@@ -454,28 +509,30 @@ POST /store-api/checkout/order
 {
   "customerComment": "Please deliver between 9-17"
 }
-# Returns: order with payment URL if needed
+# Returns: the order. A second submit of an already ordered cart answers
+# 404 CHECKOUT__CART_TOKEN_NOT_FOUND (SW 6.7.15+)
 
-# 3a. Handle immediate payment (synchronous)
-# Order state moves to "paid" automatically
-
-# 3b. Handle redirect payment (asynchronous)
+# 3. Start the payment (always, also for non-redirect methods)
 POST /store-api/handle-payment
 {
   "orderId": "ORDER_UUID",
   "finishUrl": "https://my-shop.com/checkout/finish?orderId=ORDER_UUID",
   "errorUrl": "https://my-shop.com/checkout/confirm?orderId=ORDER_UUID"
 }
-# Returns: { "redirectUrl": "https://payment-provider.com/pay?..." }
-# Redirect customer there
+# Returns: { "redirectUrl": "https://payment-provider.com/pay?..." } or { "redirectUrl": null }
+# null: the handler finished in pay() (direct capture, invoice, prepayment), go to finishUrl
+# otherwise redirect the customer there
 
-# 4. After payment provider redirects back — verify
-GET /store-api/checkout/finish?orderId=ORDER_UUID
+# 4. The provider returns to /payment/finalize-transaction?_sw_payment_token=...
+#    Shopware calls the handler's finalize() and redirects to finishUrl or errorUrl
+#    (errorUrl gets ?error-code=...). Reload the order to show its payment state:
+POST /store-api/order
+{ "filter": [{"type": "equals", "field": "id", "value": "ORDER_UUID"}] }
 ```
 
 ---
 
-## Store API — Customer Account
+## Store API: Customer Account
 
 ```bash
 # Register new customer
@@ -486,6 +543,7 @@ POST /store-api/account/register
   "email": "jane@example.com",
   "password": "SecurePass123",
   "salutationId": "SALUTATION_UUID",
+  "storefrontUrl": "https://my-shop.com",
   "billingAddress": {
     "street": "Main St 1",
     "zipcode": "12345",
@@ -493,15 +551,18 @@ POST /store-api/account/register
     "countryId": "COUNTRY_UUID"
   }
 }
+# storefrontUrl must be a sales channel domain (validated when double opt-in is on),
+# acceptedDataProtection: true is required when the data protection checkbox is enabled
 # Returns: customer + new sw-context-token
 
 # Login
 POST /store-api/account/login
 {
-  "username": "jane@example.com",
+  "email": "jane@example.com",
   "password": "SecurePass123"
 }
 # Returns: { "contextToken": "NEW_TOKEN" } + sw-context-token header
+# ("username" is still read as a fallback for "email")
 
 # Get profile
 GET /store-api/account/customer
@@ -550,6 +611,15 @@ POST /store-api/account/address
 # Set default shipping address
 PATCH /store-api/account/address/default-shipping/ADDRESS_UUID
 ```
+
+### Headless helpers (SW 6.7.14+)
+
+| Route | Returns |
+|---|---|
+| `GET /store-api/shop-settings` | Non-sensitive system config for the sales channel (`general`, `loginRegistration`, `cart`, `listing`, `newsletter`) |
+| `GET /store-api/snippet?prefixes=checkout,account` | Resolved snippets per language, `ETag`/`If-None-Match` aware. Experimental until 6.8 |
+| `GET /store-api/product/{productId}/garan-label` | EU GARAN guarantee label as SVG |
+| `GET /store-api/legal-guarantee-notice` | EU statutory legal guarantee notice |
 
 ---
 
@@ -621,7 +691,7 @@ class StoreApiClient {
     }
 
     async login(email: string, password: string): Promise<void> {
-        await this.post('/account/login', { username: email, password });
+        await this.post('/account/login', { email, password });
         // Token automatically updated via updateToken()
     }
 }
