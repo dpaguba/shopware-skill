@@ -1,4 +1,4 @@
-# Storefront — Twig, SCSS, JavaScript
+# Storefront: Twig, SCSS, JavaScript
 
 The Shopware 6 Storefront uses Twig 3 for templates, SCSS for styling, and a custom JavaScript plugin system based on vanilla JS (no jQuery, no Vue).
 
@@ -9,10 +9,10 @@ The Shopware 6 Storefront uses Twig 3 for templates, SCSS for styling, and a cus
 Never copy full templates. Always extend and override specific blocks.
 
 ```twig
-{# src/Resources/views/storefront/page/product-detail/index.html.twig #}
-{% sw_extends '@Storefront/storefront/page/product-detail/index.html.twig' %}
+{# src/Resources/views/storefront/page/content/product-detail.html.twig #}
+{% sw_extends '@Storefront/storefront/page/content/product-detail.html.twig' %}
 
-{% block page_product_detail %}
+{% block page_content %}
     {# Override the entire block #}
     <div class="my-custom-wrapper">
         {{ parent() }}
@@ -22,10 +22,15 @@ Never copy full templates. Always extend and override specific blocks.
 
 The path under `views/storefront/` must exactly mirror the path in the Storefront bundle:
 
-- Original: `vendor/shopware/storefront/Resources/views/storefront/page/product-detail/index.html.twig`
-- Override: `src/Resources/views/storefront/page/product-detail/index.html.twig`
+- Original: `vendor/shopware/storefront/Resources/views/storefront/page/content/product-detail.html.twig`
+- Override: `src/Resources/views/storefront/page/content/product-detail.html.twig`
 
 Use `{{ parent() }}` to preserve original block content.
+
+> **Product detail is a CMS layout since 6.6.** `page/product-detail/index.html.twig` and its sub-templates were
+> removed; an override of that path is silently never rendered. The page renders
+> `page/content/product-detail.html.twig`, and its parts live in `element/cms-element-*.html.twig` and
+> `component/buy-widget/`.
 
 ---
 
@@ -33,10 +38,12 @@ Use `{{ parent() }}` to preserve original block content.
 
 ```bash
 # Find all blocks in a template
-grep -r "{% block " vendor/shopware/storefront/Resources/views/storefront/page/product-detail/
+grep -r "{% block " vendor/shopware/storefront/Resources/views/storefront/component/buy-widget/
 ```
 
-Block names follow a pattern: `page_product_detail_` + area name.
+Block names follow a pattern: template prefix + area name, e.g. `buy_widget_*` in `component/buy-widget/`,
+`element_buy_box_*` in `element/cms-element-buy-box.html.twig`. The product detail page shell has `page_content`,
+`cms_breadcrumb` and `cms_content`.
 
 ---
 
@@ -65,6 +72,7 @@ Access page variables injected by subscribers:
 ## Inject Variables via Subscriber
 
 ```php
+use Shopware\Core\Framework\Struct\ArrayStruct;
 use Shopware\Storefront\Page\Product\ProductPageLoadedEvent;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 
@@ -119,7 +127,16 @@ class GlobalVariableSubscriber implements EventSubscriberInterface
 
 ## SCSS Themes
 
+### Plugin Styles
+
+A plugin without `theme.json` needs no registration: `src/Resources/app/storefront/src/scss/base.scss` is compiled
+into every theme that lists `@Plugins`, and the JS entry `src/Resources/app/storefront/src/main.js` (or `main.ts`)
+is built to `src/Resources/app/storefront/dist/storefront/js/<technical-name>/<technical-name>.js`.
+
 ### Override Theme Variables
+
+Bootstrap and Storefront variables use `!default`, so they can only be overridden in a file compiled before
+`@Storefront`. That is a theme's `overrides.scss`.
 
 Create `src/Resources/app/storefront/src/scss/overrides.scss`:
 
@@ -129,16 +146,16 @@ $primary: #ff3d00;
 $border-radius: 4px;
 ```
 
-Register in `theme.json`:
+Register in the theme's `src/Resources/theme.json`:
 
 ```json
 {
-    "name": "MyPlugin",
+    "name": "MyTheme",
     "author": "Vendor Name",
-    "views": ["@Storefront", "@Plugins", "@MyPlugin"],
-    "style": ["app/storefront/src/scss/overrides.scss"],
-    "script": ["app/storefront/dist/storefront/js/my-plugin.js"],
-    "asset": ["app/storefront/src/assets"]
+    "views": ["@Storefront", "@Plugins", "@MyTheme"],
+    "style": ["app/storefront/src/scss/overrides.scss", "@Storefront", "app/storefront/src/scss/base.scss"],
+    "script": ["@Storefront", "app/storefront/dist/storefront/js/my-theme/my-theme.js"],
+    "asset": ["@Storefront", "app/storefront/src/assets"]
 }
 ```
 
@@ -147,30 +164,30 @@ Register in `theme.json`:
 ```bash
 src/Resources/app/storefront/src/scss/
 ├── my-component.scss
-└── overrides.scss
+└── base.scss
 ```
 
-Import in `overrides.scss` or a main file registered via `theme.json`.
+Import partials from `base.scss` (plugin) or from a file registered in the theme's `style` array.
 
 ---
 
 ## JavaScript Plugin System
 
-Shopware uses a custom plugin system — not jQuery, not Vue.
+Shopware uses a custom plugin system: not jQuery, not Vue.
 
 ### Register a JS Plugin
 
 ```js
-import MyPlugin from './my-plugin/my-plugin.plugin';
-
 const PluginManager = window.PluginManager;
-PluginManager.register('MyPlugin', MyPlugin, '[data-my-plugin]');
+
+// Lazy: the chunk loads only when the selector is on the page
+PluginManager.register('MyPlugin', () => import('./my-plugin/my-plugin.plugin'), '[data-my-plugin]');
 ```
 
 ### Plugin Class
 
 ```js
-import Plugin from 'src/plugin-system/plugin.class';
+import Plugin from 'src/plugin-system/plugin.class'; // or: extends window.PluginBaseClass
 
 export default class MyPlugin extends Plugin {
     static options = {
@@ -179,34 +196,49 @@ export default class MyPlugin extends Plugin {
     };
 
     init() {
-        this.el;           // The DOM element the plugin is attached to
-        this._options;     // Merged options (from static options + data attrs)
+        this.el;          // The DOM element the plugin is attached to
+        this.options;     // Merged options (static options + data-my-plugin-options)
 
-        this._registerEvents();
+        this._onClick = this._onClick.bind(this);
+        this.el.addEventListener('click', this._onClick);
     }
 
-    _registerEvents() {
-        this.el.addEventListener('click', this._onClick.bind(this));
+    // SW 6.7.14+: called before the PluginManager replaces this instance
+    destroy() {
+        this.el.removeEventListener('click', this._onClick);
     }
 
     _onClick(event) {
         event.preventDefault();
-        console.log(this._options.value);
+        console.log(this.options.value);
     }
 }
 ```
 
-The plugin attaches to `[data-my-plugin]` DOM elements. Pass options via data attributes:
+The plugin attaches to `[data-my-plugin]` DOM elements. Pass options as JSON in the `-options` attribute:
 
 ```html
-<div data-my-plugin="true" data-my-plugin-value="custom">...</div>
+<div data-my-plugin data-my-plugin-options='{ "value": "custom" }'>...</div>
 ```
 
 ### Accessing Other Plugins
 
 ```js
-const otherPlugin = window.PluginManager.getPluginInstance('OtherPlugin', this.el);
+const otherPlugin = window.PluginManager.getPluginInstanceFromElement(otherElement, 'OtherPlugin');
+
+// SW 6.7.11+: call a method on every instance
+window.PluginManager.callPluginMethod('OtherPlugin', 'refresh');
 ```
+
+### Overriding and Extending Plugins (SW 6.7.14+)
+
+`PluginManager.override('AddToCart', MyAddToCart, '[data-add-to-cart]')` now also works for async (lazy) core
+plugins, and `PluginManager.extend()` works again. `override()` needs the exact selector the plugin was registered
+with. An instance that is already on the page gets replaced, and its `destroy()` is called first; core plugins
+mostly lack `destroy()`, so register overrides in your entry file before plugins initialize.
+
+Each extension bundle now has its own webpack chunk global (`webpackChunk<technical_name>`) instead of sharing
+`window.webpackChunk`; rebuild storefront assets after updating.
 
 ---
 
@@ -215,6 +247,9 @@ const otherPlugin = window.PluginManager.getPluginInstance('OtherPlugin', this.e
 ```bash
 # Full build
 bin/build-storefront.sh
+
+# Hot proxy watcher (project)
+bin/watch-storefront.sh
 
 # Compile theme
 bin/console theme:compile
@@ -230,7 +265,8 @@ composer storefront:dev-server
 ```
 
 Vite based, needs no proxy, and applies SCSS and JS changes live while you browse the normal Storefront.
-`composer watch:storefront` still works but is deprecated and will be removed in 6.8.
+This Composer script exists in the `shopware/shopware` platform checkout; a project's `bin/watch-storefront.sh`
+still starts the hot proxy. `composer watch:storefront` still works but is deprecated and will be removed in 6.8.
 
 ### Global JS event bus (SW 6.7.11+)
 
@@ -278,33 +314,32 @@ class MyController extends StorefrontController
 }
 ```
 
-Register controller in `services.xml` — no `<call>` directives needed, `StorefrontController` receives container and twig automatically:
+Register the controller in `src/Resources/config/services.php`. It must be public and get the container through
+`setContainer`, as the core Storefront controllers do:
 
-```xml
-<service id="VendorName\PluginName\Storefront\Controller\MyController"
-         public="true"/>
+```php
+$services->set(MyController::class)
+    ->public()
+    ->call('setContainer', [service('service_container')]);
 ```
 
-Register route in `src/Resources/config/routes.xml` (Shopware auto-discovers this path — no `build()` override needed in `PluginName.php`):
+Register routes in `src/Resources/config/routes.php` (Shopware auto-discovers this path; no `build()` override
+needed in `PluginName.php`):
 
-```xml
-<?xml version="1.0" encoding="UTF-8" ?>
-<routes xmlns="http://symfony.com/schema/routing"
-        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-        xsi:schemaLocation="http://symfony.com/schema/routing
-        https://symfony.com/schema/routing/routing-1.0.xsd">
+```php
+<?php declare(strict_types=1);
 
-    <import resource="../../Storefront/Controller/**"
-            type="attribute"
-            ignore-errors="false"/>
-</routes>
+use Symfony\Component\Routing\Loader\Configurator\RoutingConfigurator;
+
+return static function (RoutingConfigurator $routes): void {
+    $routes->import('../../Storefront/Controller/*Controller.php', 'attribute');
+};
 ```
 
-For POST routes, include CSRF token in templates (see references/security.md):
+> **6.7.14+:** `services.xml` and `routes.xml` are deprecated and no longer loaded in 6.8. Use the PHP formats above.
 
-```twig
-{{ sw_csrf('frontend.my-page.post') }}
-```
+Storefront CSRF tokens were removed in 6.5 in favour of SameSite cookies, so POST forms need no token and there is
+no `sw_csrf` function anymore (see references/security.md).
 
 ---
 
@@ -320,8 +355,8 @@ Shopware adds many custom Twig functions:
 {# Asset URL #}
 {{ asset('bundles/myplugin/image.png') }}
 
-{# Media thumbnail #}
-{{ thumbnail(media, 800, 600) }}
+{# Responsive media thumbnails (tag, not function) #}
+{% sw_thumbnails 'my-image-thumbnails' with { media: product.cover.media } %}
 
 {# Translation #}
 {{ 'my.translation.key' | trans }}
@@ -332,6 +367,10 @@ Shopware adds many custom Twig functions:
 
 {# Date formatting #}
 {{ order.orderDateTime | date('d.m.Y') }}
+
+{# Plugin config (system config) and theme config #}
+{{ config('MyPlugin.config.myKey') }}
+{{ theme_config('sw-color-brand-primary') }}
 
 {# Feature toggle #}
 {% if feature('FEATURE_NEXT_12345') %}
@@ -356,7 +395,9 @@ Create `src/Resources/snippet/en_GB/my-plugin.en-GB.json`:
 }
 ```
 
-Shopware discovers snippets automatically by scanning `Resources/snippet/`.
+Shopware discovers snippets automatically by scanning `Resources/snippet/` for `<name>.<locale>.json`. Since 6.7.3
+core files use country-agnostic locales (`storefront.en.json`), which is the recommended naming for new files;
+`en-GB` files keep working.
 
 Use in Twig:
 
@@ -376,15 +417,14 @@ Use in Twig:
 | Admin preview | No | Yes (screenshot) |
 | Sales-channel assignment | Plugin active = always on | Must be assigned to sales channel |
 
-A plugin can bundle a theme by implementing `ThemeInterface`:
+A plugin can bundle a theme by implementing the (empty marker) `ThemeInterface` and shipping
+`src/Resources/theme.json`; the path is fixed, there is no method to configure it:
 
 ```php
+use Shopware\Storefront\Framework\ThemeInterface;
+
 class MyPlugin extends Plugin implements ThemeInterface
 {
-    public function getThemeConfigPath(): string
-    {
-        return 'theme.json';
-    }
 }
 ```
 
@@ -392,7 +432,7 @@ class MyPlugin extends Plugin implements ThemeInterface
 
 ## Template Inclusion
 
-Use `{% sw_include %}` instead of Twig's native `{% include %}` — it resolves bundle-prefixed paths with the same inheritance chain as `{% sw_extends %}`:
+Use `{% sw_include %}` instead of Twig's native `{% include %}`. It resolves bundle-prefixed paths with the same inheritance chain as `{% sw_extends %}`:
 
 ```twig
 {% sw_include '@Storefront/storefront/component/address/address-form.html.twig' %}
