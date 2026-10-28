@@ -1,4 +1,4 @@
-# Plugin Structure — Full Anatomy
+# Plugin Structure: Full Anatomy
 
 ---
 
@@ -11,7 +11,7 @@
     "type": "shopware-platform-plugin",
     "license": "MIT",
     "require": {
-        "shopware/core": "~6.6.0"
+        "shopware/core": "~6.7.0"
     },
     "extra": {
         "shopware-plugin-class": "VendorName\\PluginName\\PluginName",
@@ -81,76 +81,81 @@ Only implement lifecycle methods when there is a concrete reason. An empty `inst
 
 ---
 
-## services.xml — Full Reference
+## services.php: Full Reference
 
-```xml
-<?xml version="1.0" ?>
-<container xmlns="http://symfony.com/schema/dic/services"
-           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-           xsi:schemaLocation="http://symfony.com/schema/dic/services
-           http://symfony.com/schema/dic/services/services-1.0.xsd">
+> XML service config (`services.xml`) is deprecated since 6.7.14 and removed in 6.8; PHP config works on
+> 6.6 and 6.7 too. The same applies to `routes.xml` (use `routes.php`). Service ids, arguments and tags
+> stay identical, only the notation changes. `config.xml`, `custom-fields.xml` and app manifests stay XML.
 
-    <services>
+```php
+<?php declare(strict_types=1);
 
-        <!-- Basic Service -->
-        <service id="VendorName\PluginName\Service\MyService">
-            <argument type="service" id="product.repository"/>
-            <argument type="service" id="logger"/>
-        </service>
+use Symfony\Component\DependencyInjection\Loader\Configurator\ContainerConfigurator;
+use VendorName\PluginName\Api\Controller\MyApiController;
+use VendorName\PluginName\Command\MyCommand;
+use VendorName\PluginName\Core\Content\MyEntity\MyEntityDefinition;
+use VendorName\PluginName\Decorator\MyDecorator;
+use VendorName\PluginName\ScheduledTask\MyTaskHandler;
+use VendorName\PluginName\Service\MyService;
+use VendorName\PluginName\Storefront\Subscriber\PageSubscriber;
+use VendorName\PluginName\Subscriber\MySubscriber;
+use VendorName\PluginName\Twig\MyExtension;
 
-        <!-- Event Subscriber -->
-        <service id="VendorName\PluginName\Subscriber\MySubscriber">
-            <tag name="kernel.event_subscriber"/>
-        </service>
+use function Symfony\Component\DependencyInjection\Loader\Configurator\service;
 
-        <!-- Twig Extension -->
-        <service id="VendorName\PluginName\Twig\MyExtension">
-            <tag name="twig.extension"/>
-        </service>
+return static function (ContainerConfigurator $container): void {
+    $services = $container->services();
 
-        <!-- Console Command -->
-        <service id="VendorName\PluginName\Command\MyCommand">
-            <tag name="console.command"/>
-        </service>
+    // Basic service
+    $services->set(MyService::class)
+        ->args([service('product.repository'), service('logger')]);
 
-        <!-- Scheduled Task Handler -->
-        <service id="VendorName\PluginName\ScheduledTask\MyTaskHandler">
-            <argument type="service" id="scheduled_task.repository"/>
-            <argument type="service" id="logger"/>
-            <tag name="messenger.message_handler"/>
-        </service>
+    // Event subscriber
+    $services->set(MySubscriber::class)
+        ->tag('kernel.event_subscriber');
 
-        <!-- Decorator (wraps original.service.id) -->
-        <service id="VendorName\PluginName\Decorator\MyDecorator"
-                 decorates="original.service.id">
-            <argument type="service"
-                      id="VendorName\PluginName\Decorator\MyDecorator.inner"/>
-        </service>
+    // Twig extension
+    $services->set(MyExtension::class)
+        ->tag('twig.extension');
 
-        <!-- Entity Definition -->
-        <service id="VendorName\PluginName\Core\Content\MyEntity\MyEntityDefinition">
-            <tag name="shopware.entity.definition"/>
-        </service>
+    // Console command
+    $services->set(MyCommand::class)
+        ->tag('console.command');
 
-        <!-- Storefront Subscriber with SalesChannel context -->
-        <service id="VendorName\PluginName\Storefront\Subscriber\PageSubscriber">
-            <argument type="service" id="product.repository"/>
-            <tag name="kernel.event_subscriber"/>
-        </service>
+    // Scheduled task handler
+    $services->set(MyTaskHandler::class)
+        ->args([service('scheduled_task.repository'), service('logger')])
+        ->tag('messenger.message_handler');
 
-        <!-- Admin API Controller -->
-        <service id="VendorName\PluginName\Api\Controller\MyApiController"
-                 public="true">
-            <argument type="service" id="my_entity.repository"/>
-        </service>
+    // Decorator (wraps original.service.id)
+    $services->set(MyDecorator::class)
+        ->decorate('original.service.id')
+        ->args([service('.inner')]);
 
-    </services>
-</container>
+    // Entity definition
+    $services->set(MyEntityDefinition::class)
+        ->tag('shopware.entity.definition');
+
+    // Storefront subscriber with SalesChannel context
+    $services->set(PageSubscriber::class)
+        ->args([service('product.repository')])
+        ->tag('kernel.event_subscriber');
+
+    // Admin API controller
+    $services->set(MyApiController::class)
+        ->public()
+        ->args([service('my_entity.repository')])
+        ->call('setContainer', [service('service_container')]);
+};
 ```
+
+`$services->defaults()->autowire()->autoconfigure();` at the top removes most explicit `args()` and
+`tag()` calls: Shopware registers its base classes (`EntityDefinition`, `EntityExtension`,
+`ScheduledTask`, `EntityIndexer`, ...) for autoconfiguration.
 
 ---
 
-## Directory Structure — Complete
+## Directory Structure: Complete
 
 ```
 PluginName/
@@ -159,17 +164,18 @@ PluginName/
 │   ├── PluginName.php                          # Bootstrap
 │   ├── Resources/
 │   │   ├── config/
-│   │   │   ├── services.xml                    # DI container
-│   │   │   ├── routes.xml                      # Route imports
-│   │   │   └── config.xml                      # Plugin configuration
+│   │   │   ├── services.php                    # DI container (services.xml deprecated since 6.7.14)
+│   │   │   ├── routes.php                      # Route imports (routes.xml deprecated since 6.7.14)
+│   │   │   ├── config.xml                      # Plugin configuration
+│   │   │   └── custom-fields.xml               # Declarative custom fields (6.7.13+)
 │   │   ├── snippet/
-│   │   │   ├── en_GB/
-│   │   │   │   └── my-plugin.en-GB.json
-│   │   │   └── de_DE/
-│   │   │       └── my-plugin.de-DE.json
+│   │   │   ├── storefront.en.json              # Storefront snippets, language-only code recommended in 6.7
+│   │   │   └── storefront.de.json
+│   │   ├── app/
+│   │   │   ├── administration/src/main.js      # Admin extension entry
+│   │   │   └── storefront/src/main.js          # Storefront JS plugins entry
 │   │   └── views/
-│   │       ├── storefront/                     # Twig overrides
-│   │       └── administration/                 # Admin Twig overrides
+│   │       └── storefront/                     # Twig overrides
 │   ├── Migration/
 │   │   └── Migration1234567890CreateTable.php
 │   ├── Core/
@@ -204,7 +210,7 @@ PluginName/
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-        xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/shopware/platform/trunk/src/Core/System/SystemConfig/Schema/config.xsd">
+        xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/shopware/shopware/trunk/src/Core/System/SystemConfig/Schema/config.xsd">
 
     <card>
         <title>My Plugin Configuration</title>
@@ -248,6 +254,7 @@ PluginName/
 | `colorpicker` | Color picker |
 | `single-select` | Dropdown, one value |
 | `multi-select` | Dropdown, list of values |
+| `price` | Price input (gross/net) |
 
 `single-select` and `multi-select` take their choices from `<options>`:
 
@@ -271,8 +278,9 @@ PluginName/
 ```
 
 Field names must be unique within the plugin, at least four characters, letters and digits only, and
-must not start with a digit. Add `cache-relevant="true"` to an `<input-field>` whose value changes
-Storefront output, so the HTTP cache is invalidated when a merchant edits it.
+must not start with a digit. Add `cache-relevant="true"` (6.7.12+) to an `<input-field>` or `<component>`
+whose value changes Storefront output, so the HTTP cache is invalidated when a merchant edits it. From 6.8
+config writes no longer invalidate the cache by default, so the attribute becomes mandatory for such fields.
 
 ### Embedding admin components with `<component>`
 
@@ -391,8 +399,9 @@ Use for external HTTP calls, mail dispatch, imports, indexing, image processing,
 from a subscriber, handle in a worker.
 
 ```php
-// Message: plain data only, must be serialisable
-class SyncOrderMessage
+// Message: plain data only, must be serialisable.
+// AsyncMessageInterface routes it to the `async` transport; without it the handler runs synchronously.
+class SyncOrderMessage implements AsyncMessageInterface
 {
     public function __construct(public readonly string $orderId) {}
 }
@@ -422,7 +431,9 @@ class SyncOrderHandler
 ```
 
 Put IDs in the message, never entities: the payload is serialised, and by the time the worker picks it up
-the entity may have changed. Workers need `bin/console messenger:consume` running; without a worker the
+the entity may have changed. `AsyncMessageInterface` (and `LowPriorityMessageInterface` for the
+`low_priority` transport) live in `Shopware\Core\Framework\MessageQueue`. `#[AsMessageHandler]` is only read
+when the service is autoconfigured; otherwise tag the handler with `messenger.message_handler`. Workers need `bin/console messenger:consume` running; without a worker the
 message sits in the queue and nothing happens, which is the usual explanation for "my handler never runs".
 
 ### Scheduled tasks
@@ -465,6 +476,7 @@ class MyTask extends ScheduledTask
 
 namespace VendorName\PluginName\ScheduledTask;
 
+use Psr\Log\LoggerInterface;
 use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
 use Shopware\Core\Framework\MessageQueue\ScheduledTask\ScheduledTaskHandler;
 use Symfony\Component\Messenger\Attribute\AsMessageHandler;
@@ -488,18 +500,15 @@ class MyTaskHandler extends ScheduledTaskHandler
 > **SW 6.7 breaking change.** `ScheduledTaskHandler::__construct()` takes a `Psr\Log\LoggerInterface` as
 > its second argument. A 6.6 handler that passes only the repository fails to instantiate on 6.7.
 
-Register task and handler in `services.xml`:
+Register task and handler in `services.php`:
 
-```xml
-<service id="VendorName\PluginName\ScheduledTask\MyTask">
-    <tag name="shopware.scheduled.task"/>
-</service>
+```php
+$services->set(MyTask::class)
+    ->tag('shopware.scheduled.task');
 
-<service id="VendorName\PluginName\ScheduledTask\MyTaskHandler">
-    <argument type="service" id="scheduled_task.repository"/>
-    <argument type="service" id="logger"/>
-    <tag name="messenger.message_handler"/>
-</service>
+$services->set(MyTaskHandler::class)
+    ->args([service('scheduled_task.repository'), service('logger')])
+    ->tag('messenger.message_handler');
 ```
 
 ---
@@ -556,7 +565,7 @@ class MyCommand extends Command
 ```php
 use Shopware\Core\Content\Flow\Dispatching\Action\FlowAction;
 use Shopware\Core\Content\Flow\Dispatching\StorableFlow;
-use Shopware\Core\Framework\Event\FlowEventAware;
+use Shopware\Core\Framework\Event\OrderAware;
 
 class SendNotificationAction extends FlowAction
 {
@@ -577,12 +586,11 @@ class SendNotificationAction extends FlowAction
 }
 ```
 
-Register in `services.xml` with `key` attribute (required for Flow Builder dispatch lookup):
+Register in `services.php` with the `key` tag attribute (required for Flow Builder dispatch lookup):
 
-```xml
-<service id="VendorName\PluginName\Flow\SendNotificationAction">
-    <tag name="flow.action" key="action.my_plugin.send_notification" priority="600"/>
-</service>
+```php
+$services->set(SendNotificationAction::class)
+    ->tag('flow.action', ['key' => 'action.my_plugin.send_notification', 'priority' => 600]);
 ```
 
 ---
@@ -617,6 +625,24 @@ class MyApiController extends AbstractController
 }
 ```
 
+Register it `public()` with `setContainer` (see the `services.php` reference above) and import the
+controllers in `src/Resources/config/routes.php`:
+
+```php
+<?php declare(strict_types=1);
+
+use Symfony\Component\Routing\Loader\Configurator\RoutingConfigurator;
+
+return static function (RoutingConfigurator $routes): void {
+    $routes->import('../../Api/Controller/**/*Controller.php', 'attribute');
+};
+```
+
+Custom request headers on cross-origin API calls (6.7.15+): implement
+`Shopware\Core\Framework\Api\Cors\CorsHeaderProviderInterface::provide(CorsHeaders $headers)` and call
+`$headers->addAllowed('x-my-header')`; autoconfigured services are picked up, otherwise tag them
+`shopware.api.cors_header_provider`.
+
 ---
 
 ## Key Shopware Interfaces & Base Classes
@@ -645,10 +671,10 @@ class MyApiController extends AbstractController
 Services that must behave differently per sales channel receive `SalesChannelContext` instead of plain `Context`.
 
 ```php
-// Ignores sales channel — same result for all channels:
+// Ignores sales channel, same result for all channels:
 public function getPrice(string $productId, Context $context): float
 {
-    $product = $this->productRepository->search(new Criteria([$productId]), $context)->first();
+    $product = $this->productRepository->search(new Criteria([$productId]), $context)->getEntities()->first();
     return $product->getPrice()->first()->getGross();
 }
 
@@ -657,22 +683,21 @@ public function getPrice(string $productId, SalesChannelContext $context): float
     $criteria = new Criteria([$productId]);
     $criteria->addAssociation('prices');
 
-    $product = $this->salesChannelProductRepository->search($criteria, $context)->first();
+    $product = $this->salesChannelProductRepository->search($criteria, $context)->getEntities()->first();
     return $product->getCalculatedPrice()->getTotalPrice();
 }
 ```
 
-Use `sales_channel.product.repository` (not `product.repository`) for Storefront product queries — it automatically applies:
+Use `sales_channel.product.repository` (not `product.repository`) for Storefront product queries; it automatically applies:
 - Sales channel visibility filter
 - Currency conversion
 - Customer group pricing
 - Tax calculation
 
-```xml
-<!-- services.xml -->
-<service id="VendorName\PluginName\Service\PriceService">
-    <argument type="service" id="sales_channel.product.repository"/>
-</service>
+```php
+// services.php
+$services->set(PriceService::class)
+    ->args([service('sales_channel.product.repository')]);
 ```
 
 ### Advanced Pricing (list price, regulation price)
@@ -692,7 +717,7 @@ $this->productRepository->upsert([
                     'net'    => 126.05,
                     'linked' => true,
                 ],
-                'regulationPrice' => [        // "recommended retail price" (UVP/RRP)
+                'regulationPrice' => [        // lowest price of the last 30 days (EU Omnibus, Art. 6a 98/6/EC)
                     'gross'  => 129.99,
                     'net'    => 109.24,
                     'linked' => true,
@@ -709,7 +734,7 @@ Access calculated prices on Storefront:
 {# Current price #}
 {{ page.product.calculatedPrice.totalPrice | currency }}
 
-{# List (was) price — check it exists first #}
+{# List (was) price, check it exists first #}
 {% if page.product.calculatedPrice.listPrice %}
     <s>{{ page.product.calculatedPrice.listPrice.price | currency }}</s>
     {{ page.product.calculatedPrice.listPrice.percentage }}% off
@@ -807,3 +832,4 @@ public function onProductPageLoaded(ProductPageLoadedEvent $event): void
         return;
     }
 }
+```
