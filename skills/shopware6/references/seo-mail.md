@@ -2,7 +2,7 @@
 
 ---
 
-## Custom SEO URLs (Dynamic — entity-based)
+## Custom SEO URLs (Dynamic, entity-based)
 
 For custom entities that need auto-updating SEO URLs when entity data changes.
 
@@ -18,6 +18,7 @@ use Shopware\Core\Content\Seo\SeoUrlRoute\SeoUrlRouteConfig;
 use Shopware\Core\Content\Seo\SeoUrlRoute\SeoUrlRouteInterface;
 use Shopware\Core\Framework\DataAbstractionLayer\Entity;
 use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsFilter;
 use Shopware\Core\System\SalesChannel\SalesChannelEntity;
 use VendorName\PluginName\Core\Content\MyEntity\MyEntityDefinition;
 
@@ -26,13 +27,18 @@ class MyEntitySeoUrlRoute implements SeoUrlRouteInterface
     public const ROUTE_NAME = 'frontend.my-entity.page';
     public const DEFAULT_TEMPLATE = 'my-entity/{{ entity.name | slugify }}';
 
+    public function __construct(
+        private readonly MyEntityDefinition $definition,
+    ) {}
+
     public function getConfig(): SeoUrlRouteConfig
     {
         return new SeoUrlRouteConfig(
-            MyEntityDefinition::class,
+            $this->definition,  // EntityDefinition instance (a class-string fails)
             self::ROUTE_NAME,
             self::DEFAULT_TEMPLATE,
-            true  // supports canonical
+            true,               // skipInvalid: skip entities whose template fails to render
+            'myEntityId'        // route parameter that receives the primary key
         );
     }
 
@@ -46,7 +52,8 @@ class MyEntitySeoUrlRoute implements SeoUrlRouteInterface
     {
         return new SeoUrlMapping(
             $entity,
-            ['pathInfo' => '/my-entity/' . $entity->getId()],
+            // route parameters: path_info is generated from ROUTE_NAME (/my-entity/{myEntityId})
+            $this->getConfig()->getPrimaryKeyParameter($entity->getId()),
             [
                 'entity' => $entity,
             ]
@@ -55,13 +62,27 @@ class MyEntitySeoUrlRoute implements SeoUrlRouteInterface
 }
 ```
 
-Register:
+Register in `src/Resources/config/services.php` (snippets below are `$services->set(...)` calls in the same closure):
 
-```xml
-<service id="VendorName\PluginName\Seo\MyEntitySeoUrlRoute">
-    <tag name="shopware.seo_url.route"/>
-</service>
+```php
+<?php declare(strict_types=1);
+
+use Symfony\Component\DependencyInjection\Loader\Configurator\ContainerConfigurator;
+use VendorName\PluginName\Core\Content\MyEntity\MyEntityDefinition;
+use VendorName\PluginName\Seo\MyEntitySeoUrlRoute;
+
+use function Symfony\Component\DependencyInjection\Loader\Configurator\service;
+
+return static function (ContainerConfigurator $containerConfigurator): void {
+    $services = $containerConfigurator->services();
+
+    $services->set(MyEntitySeoUrlRoute::class)
+        ->args([service(MyEntityDefinition::class)])
+        ->tag('shopware.seo_url.route');
+};
 ```
+
+Routes tagged `shopware.seo_url.route` generate SEO URLs for Storefront sales channels only. Since 6.7.14, headless (API type) sales channels get SEO URLs for products, categories and landing pages through core `store-api.*` routes, separate `seo_url_template` rows (`is_headless = 1`) and domains flagged `is_external_storefront`.
 
 ### 2. Trigger Regeneration on Entity Write
 
@@ -82,17 +103,14 @@ class MyEntitySeoUpdater implements EventSubscriberInterface
 
     public function onMyEntityWritten(EntityWrittenEvent $event): void
     {
-        $ids = array_map(
-            fn($result) => $result->getPrimaryKey(),
-            $event->getWriteResults()
-        );
-
-        $this->seoUrlUpdater->update(MyEntitySeoUrlRoute::ROUTE_NAME, $ids);
+        $this->seoUrlUpdater->update(MyEntitySeoUrlRoute::ROUTE_NAME, $event->getIds());
     }
 }
 ```
 
 ### 3. Register Default Template in Migration
+
+A default template (`sales_channel_id` NULL) is required: `SeoUrlUpdater` throws `Default templates not configured` without one.
 
 ```php
 $connection->executeStatement('
@@ -107,6 +125,8 @@ $connection->executeStatement('
          NOW())
 ');
 ```
+
+Since 6.7.14, changing `template` through the DAL (Admin, Sync API, repository) queues `SeoUrlTemplateIndexingMessage` on `async` and regenerates the route's SEO URLs. Raw SQL like this does not. If install or update code writes the template via the DAL every time, compare values first or each run queues a full regeneration.
 
 ### Static SEO URLs (for custom controller routes)
 
@@ -130,7 +150,7 @@ $connection->executeStatement("
 
 ---
 
-## Sitemap — Custom URL Provider
+## Sitemap: Custom URL Provider
 
 Add custom URLs to the XML sitemap.
 
@@ -142,7 +162,12 @@ namespace VendorName\PluginName\Seo;
 use Shopware\Core\Content\Sitemap\Provider\AbstractUrlProvider;
 use Shopware\Core\Content\Sitemap\Struct\Url;
 use Shopware\Core\Content\Sitemap\Struct\UrlResult;
+use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsFilter;
+use Shopware\Core\Framework\Plugin\Exception\DecorationPatternException;
 use Shopware\Core\System\SalesChannel\SalesChannelContext;
+use VendorName\PluginName\Core\Content\MyEntity\MyEntityDefinition;
 
 class MyEntityUrlProvider extends AbstractUrlProvider
 {
@@ -160,20 +185,22 @@ class MyEntityUrlProvider extends AbstractUrlProvider
         throw new DecorationPatternException(self::class);
     }
 
-    public function getUrls(SalesChannelContext $context, int $limit, int $offset = 0): UrlResult
+    public function getUrls(SalesChannelContext $context, int $limit, ?int $offset = null): UrlResult
     {
+        $offset ??= 0;
+
         $criteria = new Criteria();
         $criteria->addFilter(new EqualsFilter('active', true));
         $criteria->setLimit($limit);
         $criteria->setOffset($offset);
 
-        $entities = $this->myEntityRepository->search($criteria, $context->getContext());
+        $entities = $this->myEntityRepository->search($criteria, $context->getContext())->getEntities();
 
         $urls = [];
         foreach ($entities as $entity) {
             $url = new Url();
             $url->setLoc('/my-entity/' . $entity->getId());
-            $url->setLastmod(new \DateTimeImmutable());
+            $url->setLastmod($entity->getUpdatedAt() ?? $entity->getCreatedAt() ?? new \DateTimeImmutable());
             $url->setChangefreq('weekly');
             $url->setPriority(0.5);
             $url->setResource(MyEntityDefinition::class);
@@ -182,7 +209,8 @@ class MyEntityUrlProvider extends AbstractUrlProvider
             $urls[] = $url;
         }
 
-        $nextOffset = ($entities->getTotal() > $offset + $limit) ? $offset + $limit : null;
+        // a full batch means there may be more; the core providers use the same check
+        $nextOffset = $entities->count() === $limit ? $offset + $limit : null;
 
         return new UrlResult($urls, $nextOffset);
     }
@@ -191,12 +219,15 @@ class MyEntityUrlProvider extends AbstractUrlProvider
 
 Register:
 
-```xml
-<service id="VendorName\PluginName\Seo\MyEntityUrlProvider">
-    <argument type="service" id="my_entity.repository"/>
-    <tag name="shopware.sitemap_url_provider"/>
-</service>
+```php
+use VendorName\PluginName\Seo\MyEntityUrlProvider;
+
+$services->set(MyEntityUrlProvider::class)
+    ->args([service('my_entity.repository')])
+    ->tag('shopware.sitemap_url_provider');
 ```
+
+Since 6.7.15, sitemaps are also generated for headless sales channels with an external storefront domain, and every provider is called for them. Check `$context->getSalesChannel()->getTypeId()` if your URLs exist only in the Storefront.
 
 Via YAML config for static URLs:
 
@@ -218,20 +249,20 @@ shopware:
 
 Create custom mail templates via migration. Shopware discovers templates by type.
 
-### Migration — Create Mail Template Type + Template
+### Migration: Create Mail Template Type + Template
 
 ```php
 public function update(Connection $connection): void
 {
     $typeId = Uuid::randomBytes();
+    // the type name lives only in mail_template_type_translation
     $connection->executeStatement('
         INSERT IGNORE INTO `mail_template_type`
-            (`id`, `name`, `technical_name`, `available_entities`, `created_at`)
+            (`id`, `technical_name`, `available_entities`, `created_at`)
         VALUES
-            (:id, :name, :technicalName, :entities, NOW())
+            (:id, :technicalName, :entities, NOW())
     ', [
         'id'            => $typeId,
-        'name'          => 'My Plugin Event Mail',
         'technicalName' => 'my_plugin.order_synced',
         'entities'      => json_encode(['order' => 'order']),
     ]);
@@ -303,12 +334,17 @@ public function update(Connection $connection): void
 }
 ```
 
+Do not write `mail_template_type.template_data`: the column is deprecated and removed in 6.8.
+
 ### Send Mail via MailService
 
 ```php
+use Shopware\Core\Checkout\Order\OrderEntity;
 use Shopware\Core\Content\Mail\Service\AbstractMailService;
+use Shopware\Core\Framework\Context;
 use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
 use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
+use Shopware\Core\Framework\DataAbstractionLayer\Search\Filter\EqualsFilter;
 
 class MyMailSender
 {
@@ -317,36 +353,40 @@ class MyMailSender
         private readonly EntityRepository $mailTemplateRepository,
     ) {}
 
-    public function sendOrderSyncedMail(Order $order, Context $context): void
+    public function sendOrderSyncedMail(OrderEntity $order, Context $context): void
     {
         $criteria = new Criteria();
         $criteria->addFilter(
             new EqualsFilter('mailTemplateType.technicalName', 'my_plugin.order_synced')
         );
-        $criteria->addAssociation('translations');
+        $criteria->setLimit(1);
 
-        $template = $this->mailTemplateRepository->search($criteria, $context)->first();
+        $template = $this->mailTemplateRepository->search($criteria, $context)->getEntities()->first();
+        $customer = $order->getOrderCustomer();
 
-        if ($template === null) {
+        if ($template === null || $customer === null) {
             return;
         }
 
-        $customer = $order->getOrderCustomer();
-
-        $this->mailService->send([
-            'recipients'   => [$customer->getEmail() => $customer->getFirstName()],
-            'senderName'   => '{{ salesChannel.name }}',
-            'subject'      => $template->getSubject(),
-            'contentHtml'  => $template->getContentHtml(),
-            'contentPlain' => $template->getContentPlain(),
-            'templateData' => [
-                'order'       => $order,
-                'salesChannel' => $order->getSalesChannel(),
+        $this->mailService->send(
+            [
+                'recipients'     => [$customer->getEmail() => $customer->getFirstName()],
+                'salesChannelId' => $order->getSalesChannelId(), // sets salesChannel, sender and snippets
+                'senderName'     => $template->getTranslation('senderName'),
+                'subject'        => $template->getTranslation('subject'),
+                'contentHtml'    => $template->getTranslation('contentHtml'),
+                'contentPlain'   => $template->getTranslation('contentPlain'),
             ],
-        ], $context);
+            $context,
+            ['order' => $order], // Twig variables go in the third argument
+        );
     }
 }
 ```
+
+For a known template id, `Shopware\Core\Content\Mail\Service\SendMailTemplate::send(new SendMailTemplateParams(...), $context)` loads the template and builds this payload for you.
+
+Since 6.7.15, `MailService` itself switches the translator to the mail's sales channel while rendering. A full replacement of `AbstractMailService` that does not call the decorated service must do this with `AbstractTranslator::injectSettings()` and `resetInjection()`.
 
 ---
 
@@ -402,11 +442,13 @@ class OrderStateService
 
     public function shipDelivery(string $orderId, Context $context): void
     {
-        $criteria = new Criteria([$orderId]);
-        $criteria->addAssociation('deliveries');
-        $order = $this->orderRepository->search($criteria, $context)->first();
+        $order = $this->orderRepository->search(new Criteria([$orderId]), $context)->getEntities()->first();
 
-        $deliveryId = $order->getDeliveries()->first()->getId();
+        // primaryOrderDelivery replaces deliveries->first() (UPGRADE-6.8)
+        $deliveryId = $order?->getPrimaryOrderDeliveryId();
+        if ($deliveryId === null) {
+            return;
+        }
 
         $this->stateMachineRegistry->transition(
             new Transition(
@@ -427,24 +469,27 @@ Prefer `OrderTransactionStateHandler` in payment handlers:
 
 ```php
 use Shopware\Core\Checkout\Order\Aggregate\OrderTransaction\OrderTransactionStateHandler;
+use Shopware\Core\Checkout\Payment\Cart\PaymentHandler\AbstractPaymentHandler;
+use Shopware\Core\Checkout\Payment\Cart\PaymentTransactionStruct;
+use Shopware\Core\Framework\Context;
+use Symfony\Component\HttpFoundation\Request;
 
-class MyPaymentHandler
+class MyPaymentHandler extends AbstractPaymentHandler
 {
     public function __construct(
         private readonly OrderTransactionStateHandler $transactionStateHandler,
     ) {}
 
-    public function finalize(AsyncPaymentTransactionStruct $transaction, ...): void
+    // supports() and pay() omitted
+    public function finalize(Request $request, PaymentTransactionStruct $transaction, Context $context): void
     {
-        $transactionId = $transaction->getOrderTransaction()->getId();
+        $transactionId = $transaction->getOrderTransactionId();
 
+        // pick the one matching the provider's answer:
         $this->transactionStateHandler->paid($transactionId, $context);
-
-        $this->transactionStateHandler->fail($transactionId, $context);
-
-        $this->transactionStateHandler->payPartially($transactionId, $context);
-
-        $this->transactionStateHandler->refund($transactionId, $context);
+        // $this->transactionStateHandler->fail($transactionId, $context);
+        // $this->transactionStateHandler->paidPartially($transactionId, $context); // payPartially() is deprecated
+        // $this->transactionStateHandler->authorize($transactionId, $context);
     }
 }
 ```
@@ -460,18 +505,23 @@ class MyPaymentHandler
 | in_progress | complete | completed |
 | in_progress | cancel | cancelled |
 | cancelled | reopen | open |
+| completed | reopen | open |
 
 **Transaction (`order_transaction`):**
 
 | Action | Notes |
 |--------|-------|
-| `do_pay` | Marks as in_progress |
+| `process` | Marks as in_progress (`do_pay` is the deprecated 6.6 name) |
+| `process_unconfirmed` | Marks as unconfirmed |
+| `authorize` | Authorized, capture pending |
 | `paid` | Fully paid |
 | `paid_partially` | Partial payment |
 | `refund` | Full refund |
 | `refund_partially` | Partial refund |
 | `fail` | Payment failed |
 | `cancel` | Cancelled |
+| `remind` | Reminded |
+| `chargeback` | Chargeback |
 | `reopen` | Back to open |
 
 **Delivery (`order_delivery`):**
@@ -484,6 +534,8 @@ class MyPaymentHandler
 | `retour_partially` | Partial return |
 | `cancel` | Cancelled |
 | `reopen` | Back to open |
+
+**Custom transitions need their own action name.** Since 6.7.15, an action with several transitions from the same source state resolves to the oldest one and triggers a deprecation. In 6.8 a migration drops such duplicates and the unique key `uniq.state_machine_transition.action_name_from_state` (`action_name`, `state_machine_id`, `from_state_id`) rejects new ones.
 
 ### Get Available Transitions
 
@@ -538,6 +590,8 @@ public static function getSubscribedEvents(): array
 }
 ```
 
+Since 6.7.14, `state_machine_history` rows carry `sourceType` (`admin-api`, `sales-channel`, `system`, or a custom `ContextSource::$type`), so a customer's storefront cancellation can be told apart from one by an integration.
+
 ---
 
 ## Custom Documents (PDF generation)
@@ -553,23 +607,34 @@ namespace VendorName\PluginName\Document;
 
 use Shopware\Core\Checkout\Document\Renderer\AbstractDocumentRenderer;
 use Shopware\Core\Checkout\Document\Renderer\DocumentRendererConfig;
+use Shopware\Core\Checkout\Document\Renderer\OrderDocumentCriteriaFactory;
 use Shopware\Core\Checkout\Document\Renderer\RenderedDocument;
 use Shopware\Core\Checkout\Document\Renderer\RendererResult;
+use Shopware\Core\Checkout\Document\Service\DocumentConfigLoader;
+use Shopware\Core\Checkout\Document\Service\DocumentFileRendererRegistry;
 use Shopware\Core\Checkout\Document\Struct\DocumentGenerateOperation;
 use Shopware\Core\Framework\Context;
-use Twig\Environment;
+use Shopware\Core\Framework\DataAbstractionLayer\EntityRepository;
+use Shopware\Core\Framework\Plugin\Exception\DecorationPatternException;
 
 class MyDocumentRenderer extends AbstractDocumentRenderer
 {
     public const TYPE = 'my_document';
 
-    public function __construct(private readonly Environment $twig) {}
+    public function __construct(
+        private readonly EntityRepository $orderRepository,
+        private readonly DocumentConfigLoader $documentConfigLoader,
+        private readonly DocumentFileRendererRegistry $fileRendererRegistry,
+    ) {}
 
     public function supports(): string
     {
         return self::TYPE;
     }
 
+    /**
+     * @param array<string, DocumentGenerateOperation> $operations keyed by order id
+     */
     public function render(
         array $operations,
         Context $context,
@@ -577,19 +642,38 @@ class MyDocumentRenderer extends AbstractDocumentRenderer
     ): RendererResult {
         $result = new RendererResult();
 
-        foreach ($operations as $operation) {
-            \assert($operation instanceof DocumentGenerateOperation);
+        $criteria = OrderDocumentCriteriaFactory::create(array_keys($operations), $rendererConfig->deepLinkCode, self::TYPE);
+        $orders = $this->orderRepository->search($criteria, $context)->getEntities();
 
-            $html = $this->twig->render(
-                '@VendorNamePluginName/documents/my-document.html.twig',
-                ['config' => $operation->getConfig()]
-            );
+        foreach ($orders as $order) {
+            $orderId = $order->getId();
+            $operation = $operations[$orderId] ?? null;
 
-            $document = new RenderedDocument($html);
-            $document->setName(sprintf('my-document-%s.pdf', $operation->getOrderId()));
-            $document->setContentType('application/pdf');
+            if (!$operation instanceof DocumentGenerateOperation) {
+                continue;
+            }
 
-            $result->addSuccess($operation->getOrderId(), $document);
+            try {
+                $config = clone $this->documentConfigLoader->load(self::TYPE, $order->getSalesChannelId(), $context);
+                $config->merge($operation->getConfig());
+
+                // or a number range "document_my_document" via AbstractNumberRangeValueGenerator
+                $number = $config->getDocumentNumber() ?: (string) $order->getOrderNumber();
+                $config->merge(['documentNumber' => $number]);
+
+                // snapshot the order so the document does not change with it
+                $operation->setOrderVersionId($this->orderRepository->createVersion($orderId, $context, 'document'));
+
+                $document = new RenderedDocument($number, $config->buildName(), $operation->getFileType(), $config->jsonSerialize());
+                $document->setTemplate('@VendorNamePluginName/documents/my-document.html.twig');
+                $document->setOrder($order);
+                $document->setContext($context);
+                $document->setContent($this->fileRendererRegistry->render($document)); // HTML -> PDF etc.
+
+                $result->addSuccess($orderId, $document);
+            } catch (\Throwable $e) {
+                $result->addError($orderId, $e);
+            }
         }
 
         return $result;
@@ -597,27 +681,57 @@ class MyDocumentRenderer extends AbstractDocumentRenderer
 
     public function getDecorated(): AbstractDocumentRenderer
     {
-        throw new \Shopware\Core\Framework\Plugin\Exception\DecorationPatternException(self::class);
+        throw new DecorationPatternException(self::class);
     }
 }
 ```
 
-Register:
+Register with the `document.renderer` tag:
 
-```xml
-<service id="VendorName\PluginName\Document\MyDocumentRenderer">
-    <argument type="service" id="twig"/>
-    <tag name="shopware.document.renderer"/>
-</service>
+```php
+use Shopware\Core\Checkout\Document\Service\DocumentConfigLoader;
+use Shopware\Core\Checkout\Document\Service\DocumentFileRendererRegistry;
+use VendorName\PluginName\Document\MyDocumentRenderer;
+
+$services->set(MyDocumentRenderer::class)
+    ->args([
+        service('order.repository'),
+        service(DocumentConfigLoader::class),
+        service(DocumentFileRendererRegistry::class),
+    ])
+    ->tag('document.renderer');
 ```
 
 Register document type in migration:
 
 ```php
-$connection->executeStatement('
-    INSERT IGNORE INTO `document_type`
-        (`id`, `technical_name`, `created_at`)
-    VALUES
-        (UNHEX(REPLACE(UUID(), \'-\', \'\')), \'my_document\', NOW())
-');
+$exists = $connection->fetchOne('SELECT 1 FROM `document_type` WHERE `technical_name` = ?', ['my_document']);
+if ($exists === false) {
+    $typeId = Uuid::randomBytes();
+    $connection->executeStatement('
+        INSERT INTO `document_type` (`id`, `technical_name`, `created_at`)
+        VALUES (:id, \'my_document\', NOW())
+    ', ['id' => $typeId]);
+
+    $connection->executeStatement('
+        INSERT IGNORE INTO `document_type_translation` (`document_type_id`, `language_id`, `name`, `created_at`)
+        SELECT :id, l.id, \'My document\', NOW()
+        FROM `language` l
+    ', ['id' => $typeId]);
+}
 ```
+
+### Document generation v2 (6.7.15+, default in 6.8)
+
+6.7.15 ships a new document pipeline behind the `DOCUMENT_GENERATION_REWORK` feature flag. In 6.8 the flag defaults to `true` (opt-out), in 6.9 the legacy pipeline above and the flag are removed. The legacy classes carry `#[ExperimentalReplacement(version: 'v6.9.0', ...)]` and are not `@deprecated` yet; the `document_type` entities are `@deprecated tag:v6.9.0`.
+
+- v2 never calls the legacy extension points: the `document.renderer` and `document_type.renderer` tags, legacy document events and `DocumentGenerator` decorators. Register both variants side by side during the transition
+- v2 extension points are tagged services: `shopware.document_v2.type` (extend `Shopware\Core\Checkout\DocumentV2\Type\AbstractDocumentType`), `shopware.document_v2.provider` (`...\DocumentV2\Provider\AbstractDocumentDataProvider`, supplies render data), `shopware.document_v2.renderer` (`...\DocumentV2\Renderer\AbstractDocumentRenderer`, one output format such as html, pdf, ZUGFeRD XML). They are `@experimental stableVersion:v6.8.0` until 6.8
+- v2 renders the same `@Framework/documents/*.html.twig` templates, so Twig overrides keep working. ZUGFeRD stops being a document type and becomes a file format of invoice, credit note and cancellation invoice
+- Admin API: `POST /api/_action/order/document-v2/create|upload|preview|download-archive`, `GET /api/_action/order/document-v2/{documentId}/download/{format}`, available regardless of the flag
+- Apps register document types via a `<documents>` manifest block and the `document-generation` script hook
+- Company data printed on documents moves to Settings > Basic information > Company information (per sales channel); v2 falls back to the legacy document settings when empty
+
+Concept guide: https://developer.shopware.com/docs/concepts/commerce/checkout-concept/document/
+
+**Document lifecycle events (6.7.15+):** subscribe to `Shopware\Core\Checkout\DocumentV2\Event\DocumentGeneratedEvent` (`document.generation.completed`: `documentId`, `orderId`, `orderVersionId`, `documentType`, `documentNumber`) and `DocumentDeletedEvent` (`document.generation.deleted`). Both fire for legacy and v2 documents and are Flow Builder triggers. `document.orderId` is optional now; `DocumentEntity::getOrderId()` returns `?string` in 6.8.
