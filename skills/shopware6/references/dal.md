@@ -1,4 +1,4 @@
-# DAL — Data Abstraction Layer
+# DAL: Data Abstraction Layer
 
 Shopware 6's DAL is a Symfony-based ORM that maps database tables to typed PHP objects. All persistence goes through repositories, never through raw SQL in business logic.
 
@@ -54,13 +54,15 @@ class MyEntityDefinition extends EntityDefinition
 }
 ```
 
-Register in `services.xml`:
+Register in `services.php` (XML service config is deprecated since 6.7.14 and removed in 6.8; PHP config
+works on 6.6 and 6.7 too):
 
-```xml
-<service id="VendorName\PluginName\Core\Content\MyEntity\MyEntityDefinition">
-    <tag name="shopware.entity.definition"/>
-</service>
+```php
+$services->set(MyEntityDefinition::class)
+    ->tag('shopware.entity.definition');
 ```
+
+`createdAt` and `updatedAt` are added by `EntityDefinition::defaultFields()` anyway; listing them is harmless.
 
 ---
 
@@ -117,7 +119,7 @@ class MyEntityCollection extends EntityCollection
 
 ---
 
-## Criteria — Filtering, Sorting, Pagination
+## Criteria: Filtering, Sorting, Pagination
 
 ```php
 use Shopware\Core\Framework\DataAbstractionLayer\Search\Criteria;
@@ -150,6 +152,13 @@ $criteria->setLimit(25);
 $criteria->setOffset(0);
 
 $criteria->setIds([$id1, $id2]);
+
+// Narrow the SQL read itself (unlike API `includes`, which only shape the response).
+// The two are mutually exclusive:
+$criteria->addFields(['id', 'name']);       // allowlist, returns PartialEntity instances
+$criteria->excludeFields(['description']);  // denylist, keeps the typed entity (6.7.13+)
+$criteria->resetFields();                   // drop either selection again (6.7.14+),
+$criteria->resetExcludedFields();           // e.g. to switch from one to the other
 ```
 
 ---
@@ -157,14 +166,18 @@ $criteria->setIds([$id1, $id2]);
 ## Repository Usage
 
 ```php
+/**
+ * @param EntityRepository<MyEntityCollection> $myEntityRepository
+ */
 public function __construct(
     private readonly EntityRepository $myEntityRepository,
 ) {}
 
 $result = $this->myEntityRepository->search($criteria, $context);
-$entities = $result->getEntities(); // EntityCollection
-$total    = $result->getTotal();
-$entity   = $result->first();       // nullable
+$entities = $result->getEntities();          // MyEntityCollection
+$entity   = $result->getEntities()->first(); // nullable
+$total    = $result->getTotal();             // real total only with
+                                             // $criteria->setTotalCountMode(Criteria::TOTAL_COUNT_MODE_EXACT)
 
 $idResult = $this->myEntityRepository->searchIds($criteria, $context);
 $ids      = $idResult->getIds();
@@ -187,9 +200,17 @@ $this->myEntityRepository->upsert([
 $this->myEntityRepository->delete([
     ['id' => $id],
 ], $context);
+
+// 6.7.15+: IDs in write format, e.g. to delete everything a criteria matches
+$this->myEntityRepository->delete($idResult->getPrimaryKeyData(), $context);
 ```
 
-The repository ID in `services.xml` follows the pattern `{entity_name}.repository`.
+The repository service ID follows the pattern `{entity_name}.repository`; with autowiring, a
+`$myEntityRepository` argument typed `EntityRepository` resolves to `my_entity.repository`.
+
+> **6.8:** `EntitySearchResult` stops extending `EntityCollection`. Call `first()`, `filter()`, `count()`,
+> `getElements()` and iterate on `$result->getEntities()`, and use `searchResult.entities` in Twig.
+> Both already work on 6.7.
 
 ---
 
@@ -282,9 +303,9 @@ works and is what you need on 6.6 or when the set is built at runtime.
 Field elements: `int`, `float`, `text`, `text-area`, `bool`, `datetime`, `single-select`, `multi-select`,
 `single-entity-select`, `multi-entity-select`, `color-picker`, `media-selection`, `price`.
 
-Common child elements on every field: `label`, `help-text`, `required`, `position`, `placeholder`,
-`allow-customer-write`, `allow-cart-expose`, `include-in-search`. Numeric fields add `min`, `max`, `steps`;
-entity selects add `entity`.
+Common child elements on every field: `label`, `help-text`, `required`, `position`,
+`allow-customer-write`, `allow-cart-expose`, `include-in-search`. Text, numeric and select fields add
+`placeholder`; numeric fields add `min`, `max`, `steps`; entity selects add `entity` and `label-property`.
 
 Custom field names are **global across the shop**, so prefix both the set name and every field name with
 your vendor short code. Scaffold a starting file with
@@ -333,7 +354,7 @@ $entity->getCustomFields()['my_plugin_special_note'] ?? null;
 
 Translatable entities need three things: a `TranslatedField` in the main definition, a `TranslationDefinition` class, and a `_translation` database table.
 
-### 1. Main Definition — add TranslatedField
+### 1. Main Definition: add TranslatedField
 
 ```php
 protected function defineFields(): FieldCollection
@@ -341,7 +362,7 @@ protected function defineFields(): FieldCollection
     return new FieldCollection([
         (new IdField('id', 'id'))->addFlags(new ApiAware(), new PrimaryKey(), new Required()),
 
-        // TranslatedField wraps the actual field — reads from translation table
+        // TranslatedField wraps the actual field, reads from translation table
         (new TranslatedField('name'))->addFlags(new ApiAware(), new Required()),
         (new TranslatedField('description'))->addFlags(new ApiAware()),
 
@@ -388,7 +409,8 @@ class MyEntityTranslationDefinition extends EntityTranslationDefinition
     protected function defineFields(): FieldCollection
     {
         return new FieldCollection([
-            // id, language_id, my_entity_id are added automatically by EntityTranslationDefinition
+            // my_entity_id + language_id (composite primary key, no `id`), created_at and updated_at
+            // are added automatically by EntityTranslationDefinition
             (new StringField('name', 'name'))->addFlags(new ApiAware(), new Required()),
             (new LongTextField('description', 'description'))->addFlags(new ApiAware()),
         ]);
@@ -396,18 +418,16 @@ class MyEntityTranslationDefinition extends EntityTranslationDefinition
 }
 ```
 
-Register in `services.xml`:
+Register in `services.php`:
 
-```xml
-<service id="VendorName\PluginName\Core\Content\MyEntity\MyEntityDefinition">
-    <tag name="shopware.entity.definition"/>
-</service>
-<service id="VendorName\PluginName\Core\Content\MyEntity\MyEntityTranslationDefinition">
-    <tag name="shopware.entity.definition"/>
-</service>
+```php
+$services->set(MyEntityDefinition::class)
+    ->tag('shopware.entity.definition');
+$services->set(MyEntityTranslationDefinition::class)
+    ->tag('shopware.entity.definition');
 ```
 
-### 3. Migration — create `_translation` table
+### 3. Migration: create `_translation` table
 
 ```php
 <?php declare(strict_types=1);
@@ -489,7 +509,7 @@ Translated fields are resolved automatically to the context language:
 
 ```php
 $criteria = new Criteria([$id]);
-$entity = $this->myEntityRepository->search($criteria, $context)->first();
+$entity = $this->myEntityRepository->search($criteria, $context)->getEntities()->first();
 
 $name = $entity->getName();        // resolved to context language, falls back to default
 $translated = $entity->getTranslated(); // ['name' => '...', 'description' => '...']
@@ -509,7 +529,8 @@ In Twig:
 ```php
 use Shopware\Core\Framework\Context;
 
-$context = Context::createDefaultContext();
+// CLI commands, scheduled tasks, migrations: createDefaultContext() is @internal
+$context = Context::createCLIContext();
 
 public function myAction(Request $request, Context $context): Response {}
 
@@ -531,7 +552,7 @@ The DAL dispatches lifecycle events for every write operation:
 | `{entity}.written` | After create/update/upsert for a specific entity |
 | `{entity}.deleted` | After delete |
 | `{entity}.loaded`  | After search/read hydration |
-| `EntityWrittenContainerEvent` | Wraps all entity writes in one batch — use this to react to any write regardless of entity type |
+| `EntityWrittenContainerEvent` | Wraps all entity writes in one batch; use this to react to any write regardless of entity type |
 
 ```php
 use Shopware\Core\Framework\DataAbstractionLayer\Event\EntityWrittenEvent;
@@ -555,38 +576,50 @@ public function onProductWritten(EntityWrittenEvent $event): void
 ## Migration Patterns
 
 ```php
-$connection->executeStatement('
-    ALTER TABLE `product`
-    ADD COLUMN `my_plugin_score` INT NULL AFTER `updated_at`;
-');
+public function update(Connection $connection): void
+{
+    if (!$this->columnExists($connection, 'my_entity', 'score')) {
+        $connection->executeStatement('ALTER TABLE `my_entity` ADD COLUMN `score` INT NULL');
+    }
+}
 
-$connection->executeStatement('
-    ALTER TABLE `product` DROP COLUMN IF EXISTS `my_plugin_score`;
-');
-
-$schemaManager = $connection->createSchemaManager();
-$columns = $schemaManager->listTableColumns('product');
-if (!isset($columns['my_plugin_score'])) {
-    $connection->executeStatement('ALTER TABLE `product` ADD COLUMN ...');
+public function updateDestructive(Connection $connection): void
+{
+    $this->dropColumnIfExists($connection, 'my_entity', 'legacy_score'); // 6.6.4+
 }
 ```
 
-Always guard destructive changes with `IF EXISTS` or schema inspection.
+MySQL has no `DROP COLUMN IF EXISTS` (that is MariaDB syntax). Guard changes with the `MigrationStep`
+helpers: `columnExists()`, `indexExists()`, `dropColumnIfExists()`, `dropIndexIfExists()`,
+`dropForeignKeyIfExists()`, `dropTableIfExists()`.
+
+Foreign keys to versioned core tables (`product`, `order`, `category`, ...) must cover the whole primary
+key `(id, version_id)`; since 6.7.13 `bin/console dal:validate` reports non-standard FKs, which MySQL 8.4
+rejects. Since 6.7.14 the helpers above retry DDL that MySQL 8.4 refuses through bug #118151; send raw DDL
+through `$this->executeDdlStatement($connection, $sql)` for the same retry (marked `@internal` only
+because it goes away once MySQL fixes the bug).
 
 ---
 
 ## Entity Extensions (Extend Core Entities)
 
-Entity Extensions add fields and associations to existing Shopware entities **without modifying core files**. Unlike custom fields (JSON blob), extensions add typed database columns.
+Entity Extensions add associations to existing Shopware entities **without modifying core files**. The
+typed data lives in your own table, joined to the core entity; unlike custom fields (JSON blob) it has a
+real schema.
+
+`extendFields()` only accepts association fields, an `FkField` or `ReferenceVersionField` that belongs to
+a ManyToOne added in the same extension, and fields flagged `Runtime` (computed, not persisted). A plain
+`StringField` or `FloatField` throws `FRAMEWORK__WRONG_FIELD_TYPE_FOR_EXTENSION`, so an extension cannot
+add columns to `product`.
 
 ### When to use EntityExtension vs Custom Fields
 
 | | EntityExtension | Custom Fields |
 |---|---|---|
 | Type safety | Yes | No (JSON) |
-| DAL filters | Yes | Yes (`customFields.key`) |
+| DAL filters | Yes (`myPluginData.score`) | Yes (`customFields.key`) |
 | Admin UI | Manual | Auto-generated |
-| DB column | Yes (migration needed) | No (stored in JSON) |
+| Storage | Own table (migration needed) | JSON column of the entity |
 | Good for | Plugin-internal typed data | User-configurable data |
 
 ### Extension Class
@@ -599,9 +632,9 @@ namespace VendorName\PluginName\Extension;
 use Shopware\Core\Content\Product\ProductDefinition;
 use Shopware\Core\Framework\DataAbstractionLayer\EntityExtension;
 use Shopware\Core\Framework\DataAbstractionLayer\Field\Flag\ApiAware;
-use Shopware\Core\Framework\DataAbstractionLayer\Field\FloatField;
-use Shopware\Core\Framework\DataAbstractionLayer\Field\StringField;
+use Shopware\Core\Framework\DataAbstractionLayer\Field\OneToOneAssociationField;
 use Shopware\Core\Framework\DataAbstractionLayer\FieldCollection;
+use VendorName\PluginName\Core\Content\ProductData\MyPluginProductDataDefinition;
 
 class ProductExtension extends EntityExtension
 {
@@ -609,21 +642,14 @@ class ProductExtension extends EntityExtension
     {
         // Prefix with your plugin name to avoid conflicts
         $collection->add(
-            (new FloatField('my_plugin_score', 'myPluginScore'))
-                ->addFlags(new ApiAware())
-            // NEVER add Required() flag to extension fields on existing entities
-            // — this would break all existing products missing the value
+            (new OneToOneAssociationField(
+                'myPluginData',                       // property name
+                'id',                                 // local column (product.id)
+                'product_id',                         // column in your table
+                MyPluginProductDataDefinition::class,
+                false                                 // autoload
+            ))->addFlags(new ApiAware())
         );
-
-        $collection->add(
-            (new StringField('my_plugin_external_id', 'myPluginExternalId'))
-                ->addFlags(new ApiAware())
-        );
-    }
-
-    public function getDefinitionClass(): string
-    {
-        return ProductDefinition::class;
     }
 
     /**
@@ -637,77 +663,108 @@ class ProductExtension extends EntityExtension
 }
 ```
 
-> **SW 6.7 breaking change.** `EntityExtension::getEntityName()` is abstract. An extension written for
-> 6.6 that only implements `getDefinitionClass()` is fatal on 6.7.
+> **SW 6.7 breaking change.** `EntityExtension::getEntityName()` is abstract and `getDefinitionClass()`
+> (deprecated in 6.6) is gone from the base class. An extension written for 6.6 that only implements
+> `getDefinitionClass()` is fatal on 6.7; keep both methods only if the plugin must also run on 6.6.
 
-Register with **`shopware.entity.extension`** tag (not `shopware.entity.definition`):
-
-```xml
-<service id="VendorName\PluginName\Extension\ProductExtension">
-    <tag name="shopware.entity.extension"/>
-</service>
-```
-
-### Migration for Extension Fields
+The definition of your table points back to the versioned `product`:
 
 ```php
-public function update(Connection $connection): void
+class MyPluginProductDataDefinition extends EntityDefinition
 {
-    $schemaManager = $connection->createSchemaManager();
-    $columns = $schemaManager->listTableColumns('product');
+    public const ENTITY_NAME = 'my_plugin_product_data';
 
-    if (!isset($columns['my_plugin_score'])) {
-        $connection->executeStatement('
-            ALTER TABLE `product`
-            ADD COLUMN `my_plugin_score` FLOAT NULL,
-            ADD COLUMN `my_plugin_external_id` VARCHAR(255) NULL
-        ');
+    public function getEntityName(): string
+    {
+        return self::ENTITY_NAME;
+    }
+
+    protected function defineFields(): FieldCollection
+    {
+        return new FieldCollection([
+            (new IdField('id', 'id'))->addFlags(new ApiAware(), new PrimaryKey(), new Required()),
+            (new FkField('product_id', 'productId', ProductDefinition::class))->addFlags(new ApiAware(), new Required()),
+            (new ReferenceVersionField(ProductDefinition::class))->addFlags(new Required()),
+            (new FloatField('score', 'score'))->addFlags(new ApiAware()),
+            (new StringField('external_id', 'externalId'))->addFlags(new ApiAware()),
+            new OneToOneAssociationField('product', 'product_id', 'id', ProductDefinition::class, false),
+        ]);
     }
 }
 ```
 
-### Read and Write Extension Fields
+Register the definition with **`shopware.entity.definition`** and the extension with
+**`shopware.entity.extension`** (both are autoconfigured):
 
 ```php
-$criteria = new Criteria([$productId]);
-$product = $this->productRepository->search($criteria, $context)->first();
-
-$score      = $product->get('myPluginScore');      // via dynamic getter
-$externalId = $product->get('myPluginExternalId');
-
-$this->productRepository->update([
-    [
-        'id'                  => $productId,
-        'myPluginScore'       => 4.8,
-        'myPluginExternalId'  => 'ERP-12345',
-    ],
-], $context);
-
-$criteria->addFilter(new RangeFilter('myPluginScore', [RangeFilter::GTE => 4.0]));
-$criteria->addFilter(new EqualsFilter('myPluginExternalId', 'ERP-12345'));
+$services->set(MyPluginProductDataDefinition::class)
+    ->tag('shopware.entity.definition');
+$services->set(ProductExtension::class)
+    ->tag('shopware.entity.extension');
 ```
 
-### OneToOne Association Extension
+### Migration for the Extension Table
 
 ```php
-public function extendFields(FieldCollection $collection): void
+public function update(Connection $connection): void
 {
-    $collection->add(
-        new OneToOneAssociationField(
-            'myPluginData',                   // property name
-            'id',                             // local key
-            'product_id',                     // foreign key in your table
-            MyPluginProductDataDefinition::class,
-            false                             // autoload = false
-        )
-    );
+    $connection->executeStatement('
+        CREATE TABLE IF NOT EXISTS `my_plugin_product_data` (
+            `id`                 BINARY(16)   NOT NULL,
+            `product_id`         BINARY(16)   NOT NULL,
+            `product_version_id` BINARY(16)   NOT NULL,
+            `score`              DOUBLE       NULL,
+            `external_id`        VARCHAR(255) NULL,
+            `created_at`         DATETIME(3)  NOT NULL,
+            `updated_at`         DATETIME(3)  NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uniq.my_plugin_product_data.product` (`product_id`, `product_version_id`),
+            CONSTRAINT `fk.my_plugin_product_data.product_id` FOREIGN KEY (`product_id`, `product_version_id`)
+                REFERENCES `product` (`id`, `version_id`) ON DELETE CASCADE ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ');
 }
 ```
 
-Load the association explicitly:
+### Read and Write Extension Data
 
 ```php
-$criteria->addAssociation('myPluginData');
-$product = $this->productRepository->search($criteria, $context)->first();
-$myData  = $product->getExtension('myPluginData');
+$criteria = new Criteria([$productId]);
+$criteria->addAssociation('myPluginData');   // autoload is false
+$product = $this->productRepository->search($criteria, $context)->getEntities()->first();
+
+$data  = $product?->getExtension('myPluginData'); // ArrayEntity|null (no entity class defined)
+$score = $data?->get('score');
+
+$this->productRepository->update([
+    [
+        'id'           => $productId,
+        // pass the row's own `id` once it exists, otherwise DAL tries to insert a second row
+        'myPluginData' => ['id' => $dataId, 'score' => 4.8, 'externalId' => 'ERP-12345'],
+    ],
+], $context);
+
+$criteria->addFilter(new RangeFilter('myPluginData.score', [RangeFilter::GTE => 4.0]));
+$criteria->addFilter(new EqualsFilter('myPluginData.externalId', 'ERP-12345'));
+```
+
+### Modifying existing fields (6.7.1+)
+
+`modifyFields()` runs after all fields are collected. It cannot add or remove fields, but it can change
+flags or, since 6.7.15, extend a structured `JsonField` with `addPropertyMapping()`. The collection is
+keyed by property name:
+
+```php
+public function modifyFields(FieldCollection $collection): void
+{
+    $stats = $collection->get('stats'); // a JsonField with property mapping on the extended entity
+    if (!$stats instanceof JsonField) {
+        return;
+    }
+
+    $stats->addPropertyMapping(new JsonField('landing_page', 'landing_page', [
+        new IntField('maxSuggestCount', 'maxSuggestCount'),
+        new IntField('maxSearchCount', 'maxSearchCount'),
+    ]));
+}
 ```
