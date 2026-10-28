@@ -1,4 +1,4 @@
-# Integrations — Payment, Shipping, CMS, Rule Builder
+# Integrations: Payment, Shipping, CMS, Rule Builder
 
 ---
 
@@ -26,11 +26,18 @@ Handlers receive only the `orderTransactionId`, the `Request` and a `Context`. T
 `SalesChannelContext` any more: it may hold data that does not match the order (for example a customer
 address changed after checkout). Load whatever else you need yourself.
 
+Shopware never marks a transaction as paid on its own: call `OrderTransactionStateHandler::paid()` (or
+`authorize()`, `process()`, ...) once the provider confirms. Any exception thrown from `pay()` or `finalize()`
+moves the transaction to `failed`; `PaymentException::customerCanceled()` from `finalize()` moves it to
+`cancelled`. Since 6.7.14 an active
+default flow mails the customer on `state_enter.order_transaction.state.failed`.
+
 ```php
 <?php declare(strict_types=1);
 
 namespace VendorName\PluginName\Payment;
 
+use Shopware\Core\Checkout\Order\Aggregate\OrderTransaction\OrderTransactionStateHandler;
 use Shopware\Core\Checkout\Order\OrderEntity;
 use Shopware\Core\Checkout\Payment\Cart\PaymentHandler\AbstractPaymentHandler;
 use Shopware\Core\Checkout\Payment\Cart\PaymentHandler\PaymentHandlerType;
@@ -47,6 +54,7 @@ class MyPaymentHandler extends AbstractPaymentHandler
 {
     public function __construct(
         private readonly EntityRepository $orderTransactionRepository,
+        private readonly OrderTransactionStateHandler $transactionStateHandler,
         private readonly MyGateway $gateway,
     ) {}
 
@@ -73,13 +81,15 @@ class MyPaymentHandler extends AbstractPaymentHandler
         );
 
         if (!$result->isSuccessful()) {
-            throw PaymentException::asyncProcessInterrupted(
+            throw PaymentException::syncProcessInterrupted(
                 $transaction->getOrderTransactionId(),
                 'Payment declined: ' . $result->getMessage()
             );
         }
 
         // Direct capture: no redirect, finalize() will not be called
+        $this->transactionStateHandler->paid($transaction->getOrderTransactionId(), $context);
+
         return null;
     }
 
@@ -88,7 +98,7 @@ class MyPaymentHandler extends AbstractPaymentHandler
         $criteria = new Criteria([$orderTransactionId]);
         $criteria->addAssociation('order.currency');
 
-        $transaction = $this->orderTransactionRepository->search($criteria, $context)->first();
+        $transaction = $this->orderTransactionRepository->search($criteria, $context)->getEntities()->first();
 
         return $transaction->getOrder();
     }
@@ -120,15 +130,18 @@ public function finalize(
     PaymentTransactionStruct $transaction,
     Context $context
 ): void {
-    $status = $this->gateway->verifyPayment($request->query->get('transaction_id'));
+    $transactionId = $transaction->getOrderTransactionId();
+    $status = $this->gateway->verifyPayment($request->query->getString('transaction_id'));
+
+    if ($status === 'canceled') {
+        throw PaymentException::customerCanceled($transactionId, 'Canceled at the provider');
+    }
 
     if ($status !== 'paid') {
-        throw PaymentException::customerCanceled(
-            $transaction->getOrderTransactionId(),
-            'Payment not completed. Status: ' . $status
-        );
+        throw PaymentException::asyncFinalizeInterrupted($transactionId, 'Payment not completed. Status: ' . $status);
     }
-    // No exception thrown means Shopware transitions the transaction to paid
+
+    $this->transactionStateHandler->paid($transactionId, $context);
 }
 ```
 
@@ -150,14 +163,24 @@ public function validate(Cart $cart, RequestDataBag $dataBag, SalesChannelContex
 
 ### Register Payment Handler
 
-A single tag for every handler type. The `.sync` and `.async` variants are gone.
+A single tag for every handler type. The `.sync` and `.async` variants are gone. Services go in
+`src/Resources/config/services.php` (XML service config is deprecated since 6.7.14 and removed in 6.8; PHP config
+works on 6.6 and 6.7 too). With autoconfiguration the tag is added for every `AbstractPaymentHandler`.
 
-```xml
-<service id="VendorName\PluginName\Payment\MyPaymentHandler">
-    <argument type="service" id="order_transaction.repository"/>
-    <argument type="service" id="VendorName\PluginName\Gateway\MyGateway"/>
-    <tag name="shopware.payment.method"/>
-</service>
+```php
+use Shopware\Core\Checkout\Order\Aggregate\OrderTransaction\OrderTransactionStateHandler;
+use VendorName\PluginName\Gateway\MyGateway;
+use VendorName\PluginName\Payment\MyPaymentHandler;
+
+use function Symfony\Component\DependencyInjection\Loader\Configurator\service;
+
+$services->set(MyPaymentHandler::class)
+    ->args([
+        service('order_transaction.repository'),
+        service(OrderTransactionStateHandler::class),
+        service(MyGateway::class),
+    ])
+    ->tag('shopware.payment.method');
 ```
 
 ### Install Payment Method in Plugin
@@ -190,10 +213,15 @@ private function addPaymentMethod(Context $context): void
         return;
     }
 
+    // Links the method to the plugin; plugin payment methods cannot be deleted via the API
+    $pluginId = $this->container->get(PluginIdProvider::class)
+        ->getPluginIdByBaseClass(static::class, $context);
+
     $paymentMethodRepository->create([
         [
             'handlerIdentifier' => MyPaymentHandler::class,
             'technicalName'     => 'payment_myplugin_gateway', // required since 6.7
+            'pluginId'          => $pluginId,
             'name'              => 'My Payment',
             'description'       => 'Pay via My Gateway',
             'translations'      => [
@@ -305,10 +333,9 @@ class WeightBasedShippingProcessor implements CartProcessorInterface
 }
 ```
 
-```xml
-<service id="VendorName\PluginName\Cart\WeightBasedShippingProcessor">
-    <tag name="shopware.cart.processor" priority="-6000"/>
-</service>
+```php
+$services->set(WeightBasedShippingProcessor::class)
+    ->tag('shopware.cart.processor', ['priority' => -6000]);
 ```
 
 Match on `technicalName`, not on `handlerIdentifier`: shipping methods have no handler class, and
@@ -325,11 +352,21 @@ $this->container->get('shipping_method.repository')->create([
         'deliveryTimeId'       => $deliveryTimeId,
         'availabilityRuleId'   => $ruleId,
         'prices'               => [
-            ['currencyId' => Defaults::CURRENCY, 'gross' => 4.99, 'net' => 4.19, 'quantityStart' => 1],
+            [
+                'calculation'   => DeliveryCalculator::CALCULATION_BY_LINE_ITEM_COUNT,
+                'quantityStart' => 1,
+                'currencyPrice' => [
+                    ['currencyId' => Defaults::CURRENCY, 'gross' => 4.99, 'net' => 4.19, 'linked' => false],
+                ],
+            ],
         ],
     ],
 ], $context);
 ```
+
+Since 6.7.14 an **active** shipping method must keep at least one usable price row: activating a method without
+one, or removing its last usable price, fails with 400 (`active_shipping_method_without_price`). Replace a matrix
+in a single sync request, and the Store API no longer offers price-less methods with `onlyAvailable=1`.
 
 For taxes on the shipping cost, resolve the tax rules from the delivery positions instead of passing an
 empty `TaxRuleCollection`, otherwise the shipping cost is treated as tax free.
@@ -352,12 +389,13 @@ use Shopware\Core\Content\Cms\DataResolver\CriteriaCollection;
 use Shopware\Core\Content\Cms\DataResolver\Element\AbstractCmsElementResolver;
 use Shopware\Core\Content\Cms\DataResolver\Element\ElementDataCollection;
 use Shopware\Core\Content\Cms\DataResolver\ResolverContext\ResolverContext;
+use Shopware\Core\Framework\Struct\ArrayStruct;
 
 class MyBannerCmsElementResolver extends AbstractCmsElementResolver
 {
     public function getType(): string
     {
-        return 'my-banner'; // matches component name in admin JS
+        return 'my-banner'; // matches the element name in admin JS
     }
 
     public function collect(CmsSlotEntity $slot, ResolverContext $resolverContext): ?CriteriaCollection
@@ -370,22 +408,22 @@ class MyBannerCmsElementResolver extends AbstractCmsElementResolver
         ResolverContext $resolverContext,
         ElementDataCollection $result
     ): void {
-        $config = $slot->getConfig();
+        $config = $slot->getFieldConfig();
 
-        $slot->setData([
-            'title'    => $config['title']['value'] ?? '',
-            'subtitle' => $config['subtitle']['value'] ?? '',
-        ]);
+        // setData() takes a Struct, not an array
+        $slot->setData(new ArrayStruct([
+            'title'    => $config->get('title')?->getStringValue() ?? '',
+            'subtitle' => $config->get('subtitle')?->getStringValue() ?? '',
+        ]));
     }
 }
 ```
 
-Register:
+Register (the tag is `shopware.cms.data_resolver`, added automatically with autoconfiguration):
 
-```xml
-<service id="VendorName\PluginName\Content\Cms\MyBannerCmsElementResolver">
-    <tag name="shopware.cms.element"/>
-</service>
+```php
+$services->set(MyBannerCmsElementResolver::class)
+    ->tag('shopware.cms.data_resolver');
 ```
 
 ### Admin Vue Component
@@ -394,27 +432,25 @@ Register:
 Shopware.Component.register('cms-element-my-banner', {
     template: `
         <div class="cms-element-my-banner">
-            <cms-element-config-form-renderer :config="element.config" />
+            <h2>{{ element.config.title.value }}</h2>
+            <p>{{ element.config.subtitle.value }}</p>
         </div>
     `,
 
-    props: ['element'],
+    // provides the element prop, cmsService and initElementConfig()
+    mixins: [Shopware.Mixin.getByName('cms-element')],
 
     created() {
-        this.createdComponent();
-    },
-
-    methods: {
-        createdComponent() {
-            this.initElementConfig('my-banner');
-        },
+        this.initElementConfig();
     },
 });
 
+// Register cms-element-config-my-banner and cms-element-my-banner-preview the same way
 Shopware.Service('cmsService').registerCmsElement({
     name: 'my-banner',
     label: 'My Banner Element',
     component: 'cms-element-my-banner',
+    configComponent: 'cms-element-config-my-banner',
     previewComponent: 'cms-element-my-banner-preview',
     defaultConfig: {
         title: { source: 'static', value: 'Banner Title' },
@@ -439,7 +475,7 @@ Shopware.Service('cmsService').registerCmsElement({
 
 ---
 
-## Rule Builder — Custom Conditions
+## Rule Builder: Custom Conditions
 
 Custom rules let you add conditions to the Rule Builder for pricing, shipping, promotions, and CMS visibility.
 
@@ -450,23 +486,23 @@ Custom rules let you add conditions to the Rule Builder for pricing, shipping, p
 
 namespace VendorName\PluginName\Core\Rule;
 
+use Shopware\Core\Checkout\CheckoutRuleScope;
 use Shopware\Core\Framework\Rule\Rule;
 use Shopware\Core\Framework\Rule\RuleComparison;
 use Shopware\Core\Framework\Rule\RuleConfig;
 use Shopware\Core\Framework\Rule\RuleConstraints;
 use Shopware\Core\Framework\Rule\RuleScope;
-use Shopware\Core\Checkout\CheckoutRuleScope;
 
 class CustomerTierRule extends Rule
 {
-    public const RULE_NAME = 'my_plugin_customer_tier';
+    // Rule::getName() returns RULE_NAME, no override needed
+    final public const RULE_NAME = 'my_plugin_customer_tier';
 
-    protected string $operator = Rule::OPERATOR_EQ;
-    protected string $tier     = 'gold';
-
-    public function getName(): string
-    {
-        return self::RULE_NAME;
+    public function __construct(
+        protected string $operator = self::OPERATOR_EQ,
+        protected string $tier = 'gold',
+    ) {
+        parent::__construct();
     }
 
     public function match(RuleScope $scope): bool
@@ -504,39 +540,26 @@ class CustomerTierRule extends Rule
 
 Register:
 
-```xml
-<service id="VendorName\PluginName\Core\Rule\CustomerTierRule">
-    <tag name="shopware.rule.definition"/>
-</service>
+```php
+$services->set(CustomerTierRule::class)
+    ->tag('shopware.rule.definition');
 ```
 
-### Admin Component for Rule UI
+### Admin Registration for Rule UI
+
+With `getConfig()` the generic `sw-condition-generic` component renders operator and fields, no custom Vue
+component needed. Register the condition type:
 
 ```js
-Shopware.Component.register('sw-condition-my-plugin-customer-tier', {
-    template: `
-        <sw-condition-operator-select
-            :operators="conditionDataProviderService.getOperatorSet('string')"
-            :condition="condition"
-        />
-        <sw-single-select
-            v-model="tier"
-            :options="tierOptions"
-            :label="$tc('my-plugin.rule.customerTier')"
-        />
-    `,
+Shopware.Application.addServiceProviderDecorator('ruleConditionDataProviderService', (ruleConditionService) => {
+    ruleConditionService.addCondition('my_plugin_customer_tier', {
+        component: 'sw-condition-generic',
+        label: 'my-plugin.rule.customerTier',
+        scopes: ['checkout'],
+        group: 'customer',
+    });
 
-    computed: {
-        tier: {
-            get() { return this.condition.value.tier; },
-            set(value) { this.condition.value = { ...this.condition.value, tier: value }; },
-        },
-        tierOptions() {
-            return ['none', 'bronze', 'silver', 'gold', 'platinum'].map(v => ({
-                value: v, label: this.$tc(`my-plugin.rule.tier.${v}`),
-            }));
-        },
-    },
+    return ruleConditionService;
 });
 ```
 
@@ -551,8 +574,8 @@ $importExportProfileRepository = $this->container->get('import_export_profile.re
 
 $importExportProfileRepository->create([
     [
-        'name'          => 'My Entity Export',
-        'label'         => 'My Entity',
+        'technicalName' => 'my_entity_export', // required, the profile identifier
+        'label'         => 'My Entity',        // translated label, removed in 6.8
         'systemDefault' => false,
         'sourceEntity'  => 'my_entity',
         'fileType'      => 'text/csv',
@@ -581,13 +604,14 @@ Register a custom event that appears in the Flow Builder trigger list:
 
 namespace VendorName\PluginName\Event;
 
-use Shopware\Core\Framework\Event\FlowEventAware;
+use Shopware\Core\Framework\Context;
 use Shopware\Core\Framework\Event\EventData\EventDataCollection;
 use Shopware\Core\Framework\Event\EventData\ScalarValueType;
-use Shopware\Core\Framework\Context;
+use Shopware\Core\Framework\Event\FlowEventAware;
+use Shopware\Core\Framework\Event\OrderAware;
 use Symfony\Contracts\EventDispatcher\Event;
 
-class MyPluginOrderSyncedEvent extends Event implements FlowEventAware
+class MyPluginOrderSyncedEvent extends Event implements FlowEventAware, OrderAware
 {
     public const EVENT_NAME = 'my_plugin.order.synced';
 
@@ -611,10 +635,27 @@ class MyPluginOrderSyncedEvent extends Event implements FlowEventAware
 }
 ```
 
+`OrderAware` (and the other `*Aware` interfaces) makes the order available to flow actions such as mails and tags.
+Register the class in your plugin base class, otherwise it does not appear as a trigger:
+
+```php
+protected function getActionEventClasses(): array
+{
+    return [MyPluginOrderSyncedEvent::class];
+}
+```
+
 Dispatch it:
 
 ```php
 $this->eventDispatcher->dispatch(new MyPluginOrderSyncedEvent($orderId, $externalId, $context));
 ```
 
-The event then appears in the Flow Builder's trigger dropdown automatically.
+Flow events are also delivered to app webhooks. Keep secrets out of webhook payloads with
+`->add('token', new ScalarValueType(ScalarValueType::TYPE_STRING), [EventDataCollection::HIDDEN_FROM_WEBHOOK => true])`
+(SW 6.7.14.1+), or mark the whole event class `#[\Shopware\Core\Framework\Webhook\NotHookable]`. Both stay
+available in Flow Builder.
+
+> **SW 6.8.** Flows triggered during a request, message or command are buffered and run after the main
+> unit of work, so `dispatch()` returns before flow actions (mails, webhooks, custom actions) have run. Logic
+> that must be part of the business transaction belongs in a synchronous event subscriber.
